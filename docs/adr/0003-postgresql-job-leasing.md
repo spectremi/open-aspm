@@ -1,6 +1,6 @@
 # ADR-0003: PostgreSQL job leasing and retry semantics
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-22
 - **Owners:** Open ASPM maintainers
 - **Related issues:** [#6](https://github.com/spectremi/open-aspm/issues/6)

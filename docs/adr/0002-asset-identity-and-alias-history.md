@@ -1,6 +1,6 @@
 # ADR-0002: Asset identity and alias history
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-22
 - **Owners:** Open ASPM maintainers
 - **Related issues:** [#5](https://github.com/spectremi/open-aspm/issues/5)

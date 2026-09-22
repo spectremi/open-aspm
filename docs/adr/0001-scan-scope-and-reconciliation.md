@@ -1,6 +1,6 @@
 # ADR-0001: Scan scope and reconciliation semantics
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-22
 - **Owners:** Open ASPM maintainers
 - **Related issues:** [#4](https://github.com/spectremi/open-aspm/issues/4)
