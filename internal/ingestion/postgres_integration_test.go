@@ -265,7 +265,9 @@ func TestPostgresUploadLifecycleReplayAndIsolation(t *testing.T) {
 
 	upload.Content = bytes.NewReader(content)
 	replay, err := service.Upload(ctx, upload)
-	if err != nil || replay != receipt {
+	if err != nil || replay.ImportID != receipt.ImportID || replay.State != receipt.State ||
+		replay.SizeBytes != receipt.SizeBytes || replay.SHA256 != receipt.SHA256 ||
+		!replay.UploadedAt.Equal(receipt.UploadedAt) {
 		t.Fatalf("identical replay = (%+v, %v), want %+v", replay, err, receipt)
 	}
 	upload.Content = bytes.NewReader([]byte("conflicting integration evidence"))
