@@ -62,7 +62,9 @@ Implemented and tested internally:
   Application-to-Repository relationships; and
 - immutable Import analysis-context persistence that attributes every derived
   Scan to an authorized Repository relationship and feeds versioned correlation
-  dispatch without inferring identity from report content.
+  dispatch without inferring identity from report content; and
+- durable principal, membership, role, API-token scope, and fail-closed
+  authorization evaluation foundations.
 
 Available to an operator today:
 

@@ -74,7 +74,7 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Verify migrations and queue semantics
+      - name: Verify database-backed domain semantics
         env:
           OPEN_ASPM_TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: make test-integration
