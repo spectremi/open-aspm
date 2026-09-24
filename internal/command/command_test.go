@@ -112,6 +112,49 @@ func TestRunMigrateRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestRunBootstrapValidatesActionAndSecrets(t *testing.T) {
+	t.Run("action", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := Run(
+			context.Background(), []string{"bootstrap"}, &stdout, &stderr,
+			slog.New(slog.NewJSONHandler(&stderr, nil)),
+		)
+		if exitCode != exitUsage || !strings.Contains(stderr.String(), "bootstrap <init|token>") {
+			t.Fatalf("Run() = %d, stderr %q", exitCode, stderr.String())
+		}
+	})
+	t.Run("database URL", func(t *testing.T) {
+		t.Setenv("OPEN_ASPM_DATABASE_URL", "")
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := Run(
+			context.Background(), []string{"bootstrap", "init"}, &stdout, &stderr,
+			slog.New(slog.NewJSONHandler(&stderr, nil)),
+		)
+		if exitCode != exitUsage || !strings.Contains(stderr.String(), "OPEN_ASPM_DATABASE_URL is required") {
+			t.Fatalf("Run() = %d, stderr %q", exitCode, stderr.String())
+		}
+	})
+	t.Run("verifier key", func(t *testing.T) {
+		t.Setenv("OPEN_ASPM_DATABASE_URL", "postgres://example.invalid/open_aspm")
+		secret := "not-a-valid-key"
+		t.Setenv("OPEN_ASPM_TOKEN_VERIFIER_KEY", secret)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := Run(
+			context.Background(), []string{"bootstrap", "init"}, &stdout, &stderr,
+			slog.New(slog.NewJSONHandler(&stderr, nil)),
+		)
+		if exitCode != exitUsage || !strings.Contains(stderr.String(), "at least 32 bytes") {
+			t.Fatalf("Run() = %d, stderr %q", exitCode, stderr.String())
+		}
+		if strings.Contains(stderr.String(), secret) || strings.Contains(stdout.String(), secret) {
+			t.Fatal("bootstrap exposed verifier key")
+		}
+	})
+}
+
 func TestRunServerRejectsInvalidShutdownTimeout(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
