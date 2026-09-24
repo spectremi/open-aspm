@@ -56,7 +56,10 @@ Implemented and tested internally:
   source severity separately and keeps unsupported category semantics unknown;
   and
 - immutable, replay-safe persistence for explicit `uncorrelated` outcomes when
-  a versioned algorithm lacks safe Finding identity inputs.
+  a versioned algorithm lacks safe Finding identity inputs; and
+- authorized Catalog application services and workspace-scoped persistence for
+  idempotent Repository creation and explicit temporal
+  Application-to-Repository relationships.
 
 Available to an operator today:
 
@@ -67,6 +70,7 @@ Available to an operator today:
 Not yet available as an end-to-end user workflow:
 
 - authenticated ingestion HTTP routes from the published OpenAPI contract;
+- authenticated Catalog HTTP routes for Repository provisioning and linking;
 - runtime registration and an operator command for the import worker;
 - successful fingerprint correlation and durable Finding state;
 - authorized ingestion and finding query APIs; and
