@@ -71,7 +71,9 @@ Implemented and tested internally:
 Available to an operator today:
 
 - `open-aspm version`;
-- `open-aspm migrate status` and `open-aspm migrate up`; and
+- `open-aspm migrate status` and `open-aspm migrate up`;
+- `open-aspm bootstrap init` and `open-aspm bootstrap token` for initial
+  single-workspace provisioning and operator-token recovery; and
 - the loopback HTTP server with `/health/live` and `/health/ready` endpoints.
 
 Not yet available as an end-to-end user workflow:

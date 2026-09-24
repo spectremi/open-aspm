@@ -157,9 +157,60 @@ Its evaluator denies unknown, inactive, expired, revoked, cross-workspace, and
 out-of-scope decisions and treats token scope only as a restriction on current
 role grants. The authentication service generates 256-bit token secrets,
 stores only versioned HMAC verifier material, verifies credentials in constant
-time, and conditionally records use while a token remains active. Initial
-bootstrap, runtime key configuration, HTTP integration, token rotation, and
-operator-facing identity management are not implemented by this stage.
+time, and conditionally records use while a token remains active. HTTP
+integration and general operator-facing identity management are not implemented
+by this stage.
+
+## Initial operator bootstrap
+
+After applying migrations to a fresh database, configure a separately managed
+HMAC verifier key and run the one-time bootstrap command. The key is a secret;
+the key ID is non-secret and identifies the key version:
+
+```bash
+export OPEN_ASPM_DATABASE_URL='postgres://open_aspm_bootstrap:password@localhost/open_aspm?sslmode=require'
+export OPEN_ASPM_TOKEN_VERIFIER_KEY_ID='bootstrap-v1'
+export OPEN_ASPM_TOKEN_VERIFIER_KEY='<unpadded base64url encoding of at least 32 random bytes>'
+open-aspm bootstrap init
+```
+
+The command atomically creates one Workspace, one Application, an initial
+service-account principal, its workspace-scoped role, and a 30-day operator
+token. The token plaintext is written once to standard output and is never
+stored. Capture it through an appropriately protected operator channel; do not
+place it in shell history, logs, source control, or ordinary support output.
+
+`bootstrap init` refuses a database that already contains Workspace,
+Application, or principal state not tracked by the bootstrap record. It also
+refuses a second initialization. If the one-time token is lost or expires, use
+the same database and verifier-key configuration to recover:
+
+```bash
+open-aspm bootstrap token
+```
+
+This atomically revokes every previous token for the initial operator and emits
+one replacement. It does not recreate or rename domain identities. Bootstrap
+requires an operator-only database role with the necessary DML and must never
+cause the HTTP server to run with migration-owner credentials.
+
+After migrations, a dedicated bootstrap role needs only the following table
+privileges (substitute its deployment-specific role name):
+
+```sql
+GRANT USAGE ON SCHEMA open_aspm TO open_aspm_bootstrap;
+GRANT SELECT, INSERT ON open_aspm.workspaces TO open_aspm_bootstrap;
+GRANT SELECT, INSERT ON open_aspm.applications TO open_aspm_bootstrap;
+GRANT SELECT, INSERT ON open_aspm.principals TO open_aspm_bootstrap;
+GRANT INSERT ON open_aspm.workspace_memberships TO open_aspm_bootstrap;
+GRANT INSERT ON open_aspm.service_accounts TO open_aspm_bootstrap;
+GRANT INSERT ON open_aspm.roles TO open_aspm_bootstrap;
+GRANT INSERT ON open_aspm.role_capabilities TO open_aspm_bootstrap;
+GRANT INSERT ON open_aspm.role_bindings TO open_aspm_bootstrap;
+GRANT SELECT, INSERT, UPDATE (revoked_at) ON open_aspm.api_tokens TO open_aspm_bootstrap;
+GRANT INSERT ON open_aspm.api_token_capabilities TO open_aspm_bootstrap;
+GRANT SELECT, INSERT ON open_aspm.bootstrap_installations TO open_aspm_bootstrap;
+```
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,

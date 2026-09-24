@@ -40,7 +40,7 @@ func Open(ctx context.Context, databaseURL string) (*Migrator, error) {
 
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("open PostgreSQL connection: %w", err)
+		return nil, errors.New("open PostgreSQL connection failed")
 	}
 	// A session-level advisory lock occupies one connection while migrations run.
 	db.SetMaxOpenConns(4)
@@ -55,6 +55,26 @@ func Open(ctx context.Context, databaseURL string) (*Migrator, error) {
 		return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	return migrator, nil
+}
+
+// Connect opens and verifies an ordinary PostgreSQL connection without
+// running migrations. Callers remain responsible for using a role whose DML
+// privileges are limited to the requested runtime or operator workflow.
+func Connect(ctx context.Context, databaseURL string) (*sql.DB, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, errors.New("database URL is empty")
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("open PostgreSQL connection: %w", err)
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, errors.New("connect to PostgreSQL failed")
+	}
+	return db, nil
 }
 
 func newMigrator(db *sql.DB, migrationFS fs.FS) (*Migrator, error) {

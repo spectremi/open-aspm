@@ -70,8 +70,8 @@ func TestMigrationsRunAsNonSuperuser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if applied != 12 || status.Current != 12 || status.Target != 12 || status.Pending {
-		t.Fatalf("first Up() = (%+v, %d), want version 12 with twelve applied migrations", status, applied)
+	if applied != 13 || status.Current != 13 || status.Target != 13 || status.Pending {
+		t.Fatalf("first Up() = (%+v, %d), want version 13 with thirteen applied migrations", status, applied)
 	}
 	status, applied, err = migrator.Up(ctx)
 	if err != nil {
@@ -160,19 +160,20 @@ func assertFailedMigrationDoesNotAdvanceVersion(t *testing.T, ctx context.Contex
 	defer db.Close()
 
 	brokenFS := fstest.MapFS{
-		"migrations/00001_initial.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00002_second.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00003_third.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00004_fourth.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00005_fifth.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00006_sixth.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00007_seventh.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00008_eighth.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00009_ninth.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00010_tenth.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00011_eleventh.sql": &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00012_twelfth.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00013_broken.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT * FROM open_aspm.table_that_does_not_exist;\n")},
+		"migrations/00001_initial.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00002_second.sql":     &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00003_third.sql":      &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00004_fourth.sql":     &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00005_fifth.sql":      &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00006_sixth.sql":      &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00007_seventh.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00008_eighth.sql":     &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00009_ninth.sql":      &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00010_tenth.sql":      &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00011_eleventh.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00012_twelfth.sql":    &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00013_thirteenth.sql": &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00014_broken.sql":     &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT * FROM open_aspm.table_that_does_not_exist;\n")},
 	}
 	migrator, err := newMigrator(db, fs.FS(brokenFS))
 	if err != nil {
@@ -185,7 +186,7 @@ func assertFailedMigrationDoesNotAdvanceVersion(t *testing.T, ctx context.Contex
 	if err != nil {
 		t.Fatalf("read status after failed migration: %v", err)
 	}
-	if status.Current != 12 || !status.Pending {
-		t.Fatalf("status after failed migration = %+v, want current 12 and pending", status)
+	if status.Current != 13 || !status.Pending {
+		t.Fatalf("status after failed migration = %+v, want current 13 and pending", status)
 	}
 }

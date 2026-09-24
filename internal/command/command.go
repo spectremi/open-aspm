@@ -2,13 +2,17 @@ package command
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
+	"github.com/spectremi/open-aspm/internal/authentication"
+	"github.com/spectremi/open-aspm/internal/bootstrap"
 	"github.com/spectremi/open-aspm/internal/database"
 	"github.com/spectremi/open-aspm/internal/server"
 	"github.com/spectremi/open-aspm/internal/version"
@@ -44,11 +48,92 @@ func Run(
 		return runServer(ctx, args[1:], stderr, logger)
 	case "migrate":
 		return runMigrate(ctx, args[1:], stdout, stderr, logger)
+	case "bootstrap":
+		return runBootstrap(ctx, args[1:], stdout, stderr, logger)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		writeUsage(stderr)
 		return exitUsage
 	}
+}
+
+func runBootstrap(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	logger *slog.Logger,
+) int {
+	if len(args) != 1 || (args[0] != "init" && args[0] != "token") {
+		_, _ = fmt.Fprintln(stderr, "Usage: open-aspm bootstrap <init|token>")
+		return exitUsage
+	}
+	databaseURL := os.Getenv("OPEN_ASPM_DATABASE_URL")
+	if databaseURL == "" {
+		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_DATABASE_URL is required")
+		return exitUsage
+	}
+	keyID := os.Getenv("OPEN_ASPM_TOKEN_VERIFIER_KEY_ID")
+	if keyID == "" {
+		keyID = "bootstrap-v1"
+	}
+	encodedKey := os.Getenv("OPEN_ASPM_TOKEN_VERIFIER_KEY")
+	key, err := base64.RawURLEncoding.DecodeString(encodedKey)
+	if err != nil || len(key) < 32 {
+		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_TOKEN_VERIFIER_KEY must be unpadded base64url encoding of at least 32 bytes")
+		return exitUsage
+	}
+	db, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		logger.Error("bootstrap database connection failed", "error", err)
+		return exitFailure
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Warn("bootstrap database close failed", "error", err)
+		}
+	}()
+	authenticationStore, err := authentication.NewPostgresStore(db)
+	if err != nil {
+		logger.Error("bootstrap authentication setup failed", "error", err)
+		return exitFailure
+	}
+	tokenService, err := authentication.NewService(authenticationStore, authentication.Config{
+		ActiveKeyID: keyID, Keys: map[string][]byte{keyID: key},
+	})
+	if err != nil {
+		logger.Error("bootstrap token configuration failed", "error", err)
+		return exitFailure
+	}
+	bootstrapStore, err := bootstrap.NewPostgresStore(db)
+	if err != nil {
+		logger.Error("bootstrap storage setup failed", "error", err)
+		return exitFailure
+	}
+	service, err := bootstrap.NewService(
+		bootstrapStore, tokenService, bootstrap.Config{TokenTTL: 30 * 24 * time.Hour},
+	)
+	if err != nil {
+		logger.Error("bootstrap service setup failed", "error", err)
+		return exitFailure
+	}
+	var result bootstrap.Result
+	if args[0] == "init" {
+		result, err = service.Initialize(ctx)
+	} else {
+		result, err = service.RotateToken(ctx)
+	}
+	if err != nil {
+		logger.Error("operator bootstrap failed", "error", err)
+		return exitFailure
+	}
+	_, _ = fmt.Fprintf(stdout,
+		"workspace_id=%s\napplication_id=%s\nprincipal_id=%s\ntoken_id=%s\napi_token=%s\ntoken_expires_at=%s\n",
+		result.WorkspaceID, result.ApplicationID, result.PrincipalID, result.TokenID,
+		result.Token, result.TokenExpires.Format(time.RFC3339),
+	)
+	_, _ = fmt.Fprintln(stderr, "Store api_token securely now; it cannot be retrieved later.")
+	return exitOK
 }
 
 func runMigrate(
@@ -151,7 +236,8 @@ Usage:
   open-aspm <command> [options]
 
 Commands:
-  migrate   Inspect or apply PostgreSQL schema migrations
+	bootstrap Initialize the first workspace or rotate its operator token
+	migrate   Inspect or apply PostgreSQL schema migrations
   server    Run the HTTP server
   version   Print build version information
   help      Show this help
