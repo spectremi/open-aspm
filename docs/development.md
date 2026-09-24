@@ -69,6 +69,7 @@ GRANT SELECT, INSERT ON open_aspm.observations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_locations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_fingerprints TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.observation_correlation_outcomes TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_parse_outputs TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO open_aspm_runtime;
 ```
@@ -107,8 +108,16 @@ Source severity remains on the Observation; normalized severity, an explicitly
 unknown category, the retained source rule key, and the bounded primary
 artifact location remain attributable to the normalizer version. Exact replay
 does not duplicate output, and a future version may coexist without rewriting
-the earlier interpretation. Finding correlation and effective severity are not
-implemented by this stage.
+the earlier interpretation. Successful Finding correlation and effective
+severity are not implemented by this stage.
+
+The correlation context can persist an explicit immutable `uncorrelated`
+outcome for one Observation, normalization version, and correlation algorithm
+version. Canonical reason codes preserve whether target, analysis, scanner,
+rule, package, vulnerability, location, or source context was unknown or
+unsafe. Exact replay is idempotent and conflicting reuse is rejected. The
+current import worker does not invoke this operation yet, and no Finding is
+created without the stable target identity required by ADR-0007.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,
