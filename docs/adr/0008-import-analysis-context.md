@@ -1,6 +1,6 @@
 # ADR-0008: Import analysis context and catalog target attribution
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-24
 - **Owners:** Open ASPM maintainers
 - **Related issues:** MVP-005 in [CONTRIBUTOR_TASKS.md](../../CONTRIBUTOR_TASKS.md)
