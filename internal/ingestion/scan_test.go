@@ -35,6 +35,15 @@ func TestScanFingerprintIsDeterministicAndExcludesAttemptMetadata(t *testing.T) 
 	if scanA != scanB || scopeA != scopeB {
 		t.Fatalf("retry fingerprints changed: scan %x/%x scope %x/%x", scanA, scanB, scopeA, scopeB)
 	}
+	mapped := base
+	mapped.AnalysisContextImportID = mapped.ImportID
+	_, _, mappedFingerprint, _, err := canonicalizeScanSpec(mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanA == mappedFingerprint {
+		t.Fatal("analysis context reference did not participate in the scan fingerprint")
+	}
 }
 
 func TestScanValidationPreservesExplicitUnknown(t *testing.T) {
@@ -53,5 +62,10 @@ func TestScanValidationPreservesExplicitUnknown(t *testing.T) {
 	spec.Completeness = ""
 	if _, _, _, _, err := canonicalizeScanSpec(spec); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing completeness error = %v, want ErrInvalid", err)
+	}
+	spec.Completeness = ScanCompletenessUnknown
+	spec.AnalysisContextImportID = "another-import"
+	if _, _, _, _, err := canonicalizeScanSpec(spec); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mismatched analysis context error = %v, want ErrInvalid", err)
 	}
 }

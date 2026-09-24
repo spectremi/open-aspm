@@ -3,6 +3,7 @@
 package catalog
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
@@ -23,11 +24,12 @@ const (
 )
 
 var (
-	ErrInvalid               = errors.New("invalid catalog input")
-	ErrIdempotencyConflict   = errors.New("idempotency key reused for a different request")
-	ErrIdempotencyInProgress = errors.New("idempotent request is already in progress")
-	ErrWorkspaceNotFound     = errors.New("catalog workspace not found")
-	ErrLinkTargetNotFound    = errors.New("catalog relationship target not found")
+	ErrInvalid                  = errors.New("invalid catalog input")
+	ErrIdempotencyConflict      = errors.New("idempotency key reused for a different request")
+	ErrIdempotencyInProgress    = errors.New("idempotent request is already in progress")
+	ErrWorkspaceNotFound        = errors.New("catalog workspace not found")
+	ErrLinkTargetNotFound       = errors.New("catalog relationship target not found")
+	ErrRepositoryTargetNotFound = errors.New("active repository target not found")
 )
 
 var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
@@ -73,6 +75,31 @@ type ApplicationRepositoryRelationship struct {
 type RelationshipResult struct {
 	Relationship ApplicationRepositoryRelationship
 	Created      bool
+}
+
+// ResolveRepositoryTargetRequest identifies one repository attribution within
+// an already-authorized application scope.
+type ResolveRepositoryTargetRequest struct {
+	WorkspaceID   string
+	ApplicationID string
+	RepositoryID  string
+}
+
+// ResolvedRepositoryTarget is the stable Catalog identity and relationship
+// that were active when another server module accepted an attribution.
+type ResolvedRepositoryTarget struct {
+	WorkspaceID    string
+	ApplicationID  string
+	RepositoryID   string
+	RelationshipID string
+	ValidFrom      time.Time
+	ResolvedAt     time.Time
+}
+
+// RepositoryTargetResolver is the read-only Catalog application boundary used
+// after a caller has authorized the containing Application operation.
+type RepositoryTargetResolver interface {
+	ResolveActiveRepositoryTarget(context.Context, ResolveRepositoryTargetRequest) (ResolvedRepositoryTarget, error)
 }
 
 type createSpec struct {

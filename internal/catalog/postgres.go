@@ -236,3 +236,28 @@ func selectActiveRelationship(
 	}
 	return relationship, nil
 }
+
+func (store *PostgresStore) resolveActiveRepositoryTarget(
+	ctx context.Context,
+	request ResolveRepositoryTargetRequest,
+) (ResolvedRepositoryTarget, error) {
+	var target ResolvedRepositoryTarget
+	err := store.db.QueryRowContext(ctx, `
+		SELECT workspace_id, application_id, repository_id, id, valid_from, clock_timestamp()
+		FROM open_aspm.application_repository_relationships
+		WHERE workspace_id = $1 AND application_id = $2
+		  AND repository_id = $3 AND valid_from <= clock_timestamp()
+		  AND valid_until IS NULL`,
+		request.WorkspaceID, request.ApplicationID, request.RepositoryID,
+	).Scan(
+		&target.WorkspaceID, &target.ApplicationID, &target.RepositoryID,
+		&target.RelationshipID, &target.ValidFrom, &target.ResolvedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ResolvedRepositoryTarget{}, ErrLinkTargetNotFound
+	}
+	if err != nil {
+		return ResolvedRepositoryTarget{}, fmt.Errorf("resolve active repository target: %w", err)
+	}
+	return target, nil
+}

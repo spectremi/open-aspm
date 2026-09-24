@@ -42,16 +42,17 @@ type ProcessingTarget struct {
 // ProcessingSource is the authorized immutable input for one import job.
 type ProcessingSource struct {
 	ProcessingTarget
-	RawArtifactID  string
-	ReportFormat   ReportFormat
-	StorageBackend string
-	StorageKey     string
-	StorageVersion string
-	BackendVersion string
-	SizeBytes      int64
-	SHA256         string
-	MaxBytes       int64
-	ReceivedAt     time.Time
+	AnalysisContext *AnalysisContext
+	RawArtifactID   string
+	ReportFormat    ReportFormat
+	StorageBackend  string
+	StorageKey      string
+	StorageVersion  string
+	BackendVersion  string
+	SizeBytes       int64
+	SHA256          string
+	MaxBytes        int64
+	ReceivedAt      time.Time
 }
 
 // ProcessingResult is the public operation result defined by ingestion-v1.

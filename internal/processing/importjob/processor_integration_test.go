@@ -19,6 +19,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/spectremi/open-aspm/internal/blobstore/filesystem"
+	"github.com/spectremi/open-aspm/internal/catalog"
 	"github.com/spectremi/open-aspm/internal/correlation"
 	"github.com/spectremi/open-aspm/internal/database"
 	"github.com/spectremi/open-aspm/internal/finding"
@@ -144,6 +145,20 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 	if nonUnknown != 0 {
 		t.Fatalf("scans with invented outcome or coverage = %d", nonUnknown)
 	}
+	var inventedContext int
+	if err := harness.db.QueryRow(`
+		SELECT count(*) FROM open_aspm.scans AS scan
+		JOIN open_aspm.scan_scopes AS scope
+		  ON scope.workspace_id = scan.workspace_id AND scope.scan_id = scan.id
+		WHERE scan.workspace_id = $1 AND scan.import_id = $2
+		  AND (scan.analysis_context_import_id IS NOT NULL OR scope.analysis_kind <> 'unknown')`,
+		job.WorkspaceID, importIDFromJob(t, job),
+	).Scan(&inventedContext); err != nil {
+		t.Fatal(err)
+	}
+	if inventedContext != 0 {
+		t.Fatalf("scans with invented analysis context = %d", inventedContext)
+	}
 	if _, err := harness.db.Exec(`
 		UPDATE open_aspm.import_parse_outputs SET warnings_truncated = true
 		WHERE workspace_id = $1 AND import_id = $2`, job.WorkspaceID, importIDFromJob(t, job)); err == nil {
@@ -158,6 +173,85 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 		UPDATE open_aspm.observation_correlation_outcomes SET state = 'correlated'
 		WHERE workspace_id = $1`, job.WorkspaceID); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable correlation output")
+	}
+}
+
+func TestImportProcessorAppliesAcceptedContextToEveryRun(t *testing.T) {
+	harness := openProcessorHarness(t)
+	report, err := os.ReadFile("../../../testdata/sarif/valid/representative.sarif.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysisContext := &ingestion.AnalysisContextRequest{
+		AnalysisKind: ingestion.AnalysisKindSAST,
+		Target: ingestion.AnalysisTargetRequest{
+			Type: ingestion.AnalysisTargetRepository, ID: "repository-a",
+		},
+	}
+	job := harness.createImportJobWithContext(t, "mapped-context", report, analysisContext)
+	if _, err := harness.ownerDB.Exec(`
+		UPDATE open_aspm.application_repository_relationships
+		SET valid_until = clock_timestamp()
+		WHERE workspace_id = 'workspace-a' AND id = 'relationship-a'
+		  AND valid_until IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	historicalRequest := ingestion.ReserveRequest{
+		PrincipalID: "principal-a", WorkspaceID: "workspace-a", ApplicationID: "application-a",
+		IdempotencyKey:  "processor-reserve-mapped-context",
+		ReportFormat:    ingestion.ReportFormat{Name: sarif.Format, Version: sarif.FormatVersion},
+		AnalysisContext: analysisContext,
+	}
+	historical, err := harness.service.Reserve(context.Background(), historicalRequest)
+	if err != nil || historical.Created || historical.Import.ID != importIDFromJob(t, job) {
+		t.Fatalf("historical Reserve() replay = (%+v, %v)", historical, err)
+	}
+	futureRequest := ingestion.ReserveRequest{
+		PrincipalID: "principal-a", WorkspaceID: "workspace-a", ApplicationID: "application-a",
+		IdempotencyKey:  "processor-reserve-after-relationship-end",
+		ReportFormat:    ingestion.ReportFormat{Name: sarif.Format, Version: sarif.FormatVersion},
+		AnalysisContext: analysisContext,
+	}
+	if _, err := harness.service.Reserve(context.Background(), futureRequest); !errors.Is(err, ingestion.ErrAnalysisTargetNotFound) {
+		t.Fatalf("Reserve() after relationship end error = %v, want ErrAnalysisTargetNotFound", err)
+	}
+	if outcome := harness.processor.Handle(context.Background(), job); outcome.Kind != jobqueue.OutcomeSucceeded {
+		t.Fatalf("Handle() = %+v, want success", outcome)
+	}
+	importID := importIDFromJob(t, job)
+	var mappedScans int
+	if err := harness.db.QueryRow(`
+		SELECT count(*) FROM open_aspm.scans AS scan
+		JOIN open_aspm.scan_scopes AS scope
+		  ON scope.workspace_id = scan.workspace_id AND scope.scan_id = scan.id
+		WHERE scan.workspace_id = $1 AND scan.import_id = $2
+		  AND scan.analysis_context_import_id = scan.import_id
+		  AND scope.analysis_kind = 'sast'`, job.WorkspaceID, importID,
+	).Scan(&mappedScans); err != nil {
+		t.Fatal(err)
+	}
+	if mappedScans != 2 {
+		t.Fatalf("context-mapped scans = %d, want 2", mappedScans)
+	}
+	var outcomes int
+	if err := harness.db.QueryRow(`
+		SELECT count(*) FROM open_aspm.observation_correlation_outcomes AS outcome
+		JOIN open_aspm.observations AS observation
+		  ON observation.workspace_id = outcome.workspace_id
+		 AND observation.id = outcome.observation_id
+		JOIN open_aspm.scans AS scan
+		  ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id
+		WHERE scan.workspace_id = $1 AND scan.import_id = $2
+		  AND outcome.algorithm = 'correlation-dispatch'
+		  AND outcome.algorithm_version = '2'
+		  AND outcome.reason_codes = ARRAY[
+		    'scanner_family_unknown', 'source_context_unknown'
+		  ]::varchar(64)[]`, job.WorkspaceID, importID,
+	).Scan(&outcomes); err != nil {
+		t.Fatal(err)
+	}
+	if outcomes != 3 {
+		t.Fatalf("context-aware uncorrelated outcomes = %d, want 3", outcomes)
 	}
 }
 
@@ -235,6 +329,7 @@ func TestImportProcessorDoesNotCrossWorkspaceBoundary(t *testing.T) {
 
 type processorHarness struct {
 	db           *sql.DB
+	ownerDB      *sql.DB
 	service      *ingestion.Service
 	processor    *Processor
 	store        *ingestion.PostgresStore
@@ -307,7 +402,7 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ownerDB.Close()
+	t.Cleanup(func() { _ = ownerDB.Close() })
 	for _, workspaceID := range []string{"workspace-a", "workspace-b"} {
 		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO open_aspm.workspaces (id) VALUES ($1)`, workspaceID); err != nil {
 			t.Fatal(err)
@@ -316,6 +411,25 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 	if _, err := ownerDB.ExecContext(ctx, `
 		INSERT INTO open_aspm.applications (workspace_id, id)
 		VALUES ('workspace-a', 'application-a'), ('workspace-b', 'application-b')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `
+		INSERT INTO open_aspm.repositories (
+			workspace_id, id, display_name, created_by_principal_id, created_at, updated_at
+		) VALUES (
+			'workspace-a', 'repository-a', 'repository-a', 'principal-a',
+			clock_timestamp(), clock_timestamp()
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `
+		INSERT INTO open_aspm.application_repository_relationships (
+			workspace_id, id, application_id, repository_id,
+			linked_by_principal_id, valid_from
+		) VALUES (
+			'workspace-a', 'relationship-a', 'application-a', 'repository-a',
+			'principal-a', clock_timestamp()
+		)`); err != nil {
 		t.Fatal(err)
 	}
 	grants := []string{
@@ -328,6 +442,8 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_correlation_outcomes TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_outputs, open_aspm.import_parse_warnings TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT ON open_aspm.application_repository_relationships TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_analysis_contexts TO %s", runtimeIdentifier),
 	}
 	for _, grant := range grants {
 		if _, err := ownerDB.ExecContext(ctx, grant); err != nil {
@@ -360,7 +476,15 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 	}
 	t.Cleanup(func() { _ = blobs.Close() })
 	authorizer := allowProcessorAuthorizer{}
-	service, err := ingestion.NewService(store, blobs, authorizer, ingestion.Config{
+	catalogStore, err := catalog.NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := catalog.NewResolutionService(catalogStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := ingestion.NewService(store, blobs, authorizer, targets, ingestion.Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
 		StorageBackend: "filesystem-test", ProcessMaxAttempts: 3,
@@ -373,7 +497,7 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 		t.Fatal(err)
 	}
 	harness := &processorHarness{
-		db: db, service: service, store: store, observations: observationStore,
+		db: db, ownerDB: ownerDB, service: service, store: store, observations: observationStore,
 		correlations: correlationStore, blobs: blobs, parser: parser, authorizer: authorizer,
 		config: Config{
 			StorageBackend: "filesystem-test", ProcessingTimeout: time.Minute, RetryMaximumAge: time.Hour,
@@ -432,12 +556,22 @@ func (store *failOnceCompletionStore) CompleteProcessing(
 }
 
 func (harness *processorHarness) createImportJob(t *testing.T, suffix string, report []byte) jobqueue.Job {
+	return harness.createImportJobWithContext(t, suffix, report, nil)
+}
+
+func (harness *processorHarness) createImportJobWithContext(
+	t *testing.T,
+	suffix string,
+	report []byte,
+	analysisContext *ingestion.AnalysisContextRequest,
+) jobqueue.Job {
 	t.Helper()
 	ctx := context.Background()
 	request := ingestion.ReserveRequest{
 		PrincipalID: "principal-a", WorkspaceID: "workspace-a", ApplicationID: "application-a",
-		IdempotencyKey: "processor-reserve-" + suffix,
-		ReportFormat:   ingestion.ReportFormat{Name: sarif.Format, Version: sarif.FormatVersion},
+		IdempotencyKey:  "processor-reserve-" + suffix,
+		ReportFormat:    ingestion.ReportFormat{Name: sarif.Format, Version: sarif.FormatVersion},
+		AnalysisContext: analysisContext,
 	}
 	reservation, err := harness.service.Reserve(ctx, request)
 	if err != nil {

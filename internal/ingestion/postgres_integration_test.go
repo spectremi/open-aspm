@@ -24,6 +24,7 @@ import (
 
 	"github.com/spectremi/open-aspm/internal/blobstore"
 	"github.com/spectremi/open-aspm/internal/blobstore/filesystem"
+	"github.com/spectremi/open-aspm/internal/catalog"
 	"github.com/spectremi/open-aspm/internal/database"
 	"github.com/spectremi/open-aspm/internal/jobqueue"
 )
@@ -121,6 +122,82 @@ func TestPostgresReservationIdempotencyAndIsolation(t *testing.T) {
 	}
 	if retentionSeconds < int64((24*time.Hour)/time.Second) {
 		t.Fatalf("idempotency retention = %ds, want at least 24h", retentionSeconds)
+	}
+}
+
+func TestPostgresReservationPersistsResolvedAnalysisContext(t *testing.T) {
+	service, db := openReservationService(t)
+	ctx := context.Background()
+	request := validRequest()
+	request.IdempotencyKey = "context-request"
+	request.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+	}
+
+	created, err := service.Reserve(ctx, request)
+	if err != nil || !created.Created || created.Import.AnalysisContext == nil {
+		t.Fatalf("context Reserve() = (%+v, %v)", created, err)
+	}
+	context := created.Import.AnalysisContext
+	if context.TargetRelationshipID != "relationship-a" || context.TargetID != "repository-a" ||
+		context.AssertedByPrincipalID != request.PrincipalID || context.AssertionSource != AssertionSourceAPIClient {
+		t.Fatalf("accepted context = %+v", context)
+	}
+	replayed, err := service.Reserve(ctx, request)
+	if err != nil || replayed.Created || replayed.Import.AnalysisContext == nil ||
+		replayed.Import.AnalysisContext.TargetRelationshipID != context.TargetRelationshipID ||
+		!replayed.Import.AnalysisContext.AcceptedAt.Equal(context.AcceptedAt) {
+		t.Fatalf("context replay = (%+v, %v)", replayed, err)
+	}
+
+	changed := request
+	changed.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-other"},
+	}
+	if _, err := service.Reserve(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed-context Reserve() error = %v, want ErrIdempotencyConflict", err)
+	}
+	unlinked := request
+	unlinked.IdempotencyKey = "unlinked-context"
+	unlinked.ApplicationID = "application-other"
+	if _, err := service.Reserve(ctx, unlinked); !errors.Is(err, ErrAnalysisTargetNotFound) {
+		t.Fatalf("unlinked-context Reserve() error = %v, want ErrAnalysisTargetNotFound", err)
+	}
+	crossWorkspace := request
+	crossWorkspace.IdempotencyKey = "cross-workspace-context"
+	crossWorkspace.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-b"},
+	}
+	if _, err := service.Reserve(ctx, crossWorkspace); !errors.Is(err, ErrAnalysisTargetNotFound) {
+		t.Fatalf("cross-workspace-context Reserve() error = %v, want ErrAnalysisTargetNotFound", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM open_aspm.import_analysis_contexts
+		WHERE workspace_id = $1 AND import_id = $2 AND application_id = $3
+		  AND analysis_kind = 'sast' AND target_type = 'repository'
+		  AND target_id = 'repository-a' AND target_relationship_id = 'relationship-a'
+		  AND assertion_source = 'api_client' AND asserted_by_principal_id = $4`,
+		request.WorkspaceID, created.Import.ID, request.ApplicationID, request.PrincipalID,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("stored analysis context count = %d, want one", count)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE open_aspm.import_analysis_contexts SET target_id = 'repository-other'
+		WHERE workspace_id = $1 AND import_id = $2`, request.WorkspaceID, created.Import.ID); err == nil {
+		t.Fatal("runtime role unexpectedly updated immutable analysis context")
+	}
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM open_aspm.import_analysis_contexts
+		WHERE workspace_id = $1 AND import_id = $2`, request.WorkspaceID, created.Import.ID); err == nil {
+		t.Fatal("runtime role unexpectedly deleted immutable analysis context")
 	}
 }
 
@@ -735,6 +812,34 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 			t.Fatalf("create application: %v", err)
 		}
 	}
+	for _, repository := range []struct{ workspaceID, id string }{
+		{workspaceID: "workspace-a", id: "repository-a"},
+		{workspaceID: "workspace-a", id: "repository-other"},
+		{workspaceID: "workspace-b", id: "repository-b"},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `
+			INSERT INTO open_aspm.repositories (
+				workspace_id, id, display_name, created_by_principal_id, created_at, updated_at
+			) VALUES ($1, $2, $2, 'principal-a', clock_timestamp(), clock_timestamp())`,
+			repository.workspaceID, repository.id,
+		); err != nil {
+			t.Fatalf("create repository: %v", err)
+		}
+	}
+	for _, relationship := range []struct{ id, repositoryID string }{
+		{id: "relationship-a", repositoryID: "repository-a"},
+		{id: "relationship-other", repositoryID: "repository-other"},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `
+			INSERT INTO open_aspm.application_repository_relationships (
+				workspace_id, id, application_id, repository_id,
+				linked_by_principal_id, valid_from
+			) VALUES ('workspace-a', $1, 'application-a', $2, 'principal-a', clock_timestamp())`,
+			relationship.id, relationship.repositoryID,
+		); err != nil {
+			t.Fatalf("create repository relationship: %v", err)
+		}
+	}
 	grants := []string{
 		fmt.Sprintf("GRANT USAGE ON SCHEMA open_aspm TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT ON open_aspm.workspaces TO %s", runtimeIdentifier),
@@ -754,6 +859,8 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_correlation_outcomes TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_outputs TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT ON open_aspm.application_repository_relationships TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_analysis_contexts TO %s", runtimeIdentifier),
 	}
 	for _, grant := range grants {
 		if _, err := ownerDB.ExecContext(ctx, grant); err != nil {
@@ -777,7 +884,15 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = blobs.Close() })
-	service, err := NewService(store, blobs, allowAuthorizer{}, Config{
+	catalogStore, err := catalog.NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := catalog.NewResolutionService(catalogStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, blobs, allowAuthorizer{}, targets, Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
 		StorageBackend: "filesystem-test", ProcessMaxAttempts: 3,

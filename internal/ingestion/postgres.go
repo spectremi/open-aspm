@@ -456,6 +456,35 @@ func NewPostgresStore(db *sql.DB) (*PostgresStore, error) {
 	return &PostgresStore{db: db, jobs: jobs}, nil
 }
 
+// ReplayReservation returns a completed createImport result before Catalog
+// state is re-resolved. This preserves the original result after a historical
+// target relationship ends.
+func (store *PostgresStore) ReplayReservation(
+	ctx context.Context,
+	spec reservationReplaySpec,
+) (Reservation, bool, error) {
+	if !validOpaqueID(spec.WorkspaceID) || !validOpaqueID(spec.PrincipalID) ||
+		spec.APIMajorVersion != apiMajorVersion || spec.Operation != operationCreateImport ||
+		!idempotencyKeyPattern.MatchString(spec.IdempotencyKey) {
+		return Reservation{}, false, ErrInvalid
+	}
+	reservation, fingerprint, err := selectReservation(
+		ctx, store.db, spec.WorkspaceID, spec.PrincipalID, spec.APIMajorVersion,
+		spec.Operation, spec.IdempotencyKey,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Reservation{}, false, nil
+	}
+	if err != nil {
+		return Reservation{}, false, err
+	}
+	if !bytes.Equal(fingerprint, spec.RequestFingerprint[:]) {
+		return Reservation{}, false, ErrIdempotencyConflict
+	}
+	reservation.Created = false
+	return reservation, true, nil
+}
+
 // Reserve creates one import and its completed idempotency entry atomically.
 // The deferred foreign key lets the idempotency claim win before the import is
 // inserted, so concurrent retries never create committed duplicate imports.
@@ -538,6 +567,21 @@ func (store *PostgresStore) Reserve(ctx context.Context, spec reserveSpec) (Rese
 	); err != nil {
 		return Reservation{}, classifyPostgresError("insert import reservation", err)
 	}
+	if context := spec.Import.AnalysisContext; context != nil {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO open_aspm.import_analysis_contexts (
+				workspace_id, import_id, application_id, analysis_kind,
+				target_type, target_id, target_relationship_id, assertion_source,
+				asserted_by_principal_id, accepted_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			spec.Import.WorkspaceID, spec.Import.ID, spec.Import.ApplicationID,
+			context.AnalysisKind, context.TargetType, context.TargetID,
+			context.TargetRelationshipID, context.AssertionSource,
+			context.AssertedByPrincipalID, context.AcceptedAt,
+		); err != nil {
+			return Reservation{}, classifyPostgresError("insert import analysis context", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO open_aspm.raw_artifacts (
 			workspace_id, id, import_id, state, media_type_hint,
@@ -558,22 +602,31 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func selectReservation(
 	ctx context.Context,
-	tx *sql.Tx,
+	queryer rowQueryer,
 	workspaceID, principalID string,
 	apiVersion int,
 	operation, idempotencyKey string,
 ) (Reservation, []byte, error) {
-	row := tx.QueryRowContext(ctx, `
+	row := queryer.QueryRowContext(ctx, `
 		SELECT idem.request_fingerprint,
 		       imp.id, imp.workspace_id, imp.application_id, imp.created_by_principal_id,
 		       imp.state, imp.report_format_name, imp.report_format_version,
 		       imp.original_filename, imp.expected_size_bytes, imp.expected_sha256,
-		       imp.max_bytes, imp.upload_expires_at, imp.created_at, imp.updated_at
+		       imp.max_bytes, imp.upload_expires_at, imp.created_at, imp.updated_at,
+		       context.analysis_kind, context.target_type, context.target_id,
+		       context.target_relationship_id, context.assertion_source,
+		       context.asserted_by_principal_id, context.accepted_at
 		FROM open_aspm.import_create_idempotency AS idem
 		JOIN open_aspm.imports AS imp
 		  ON imp.workspace_id = idem.workspace_id AND imp.id = idem.import_id
+		LEFT JOIN open_aspm.import_analysis_contexts AS context
+		  ON context.workspace_id = imp.workspace_id AND context.import_id = imp.id
 		WHERE idem.workspace_id = $1 AND idem.principal_id = $2
 		  AND idem.api_major_version = $3 AND idem.operation = $4
 		  AND idem.idempotency_key = $5`,
@@ -592,12 +645,17 @@ func scanImport(row rowScanner, fingerprint *[]byte) (Import, error) {
 	var reportVersion, originalFilename sql.NullString
 	var expectedSize sql.NullInt64
 	var expectedDigest []byte
+	var analysisKind, targetType, targetID, targetRelationshipID sql.NullString
+	var assertionSource, assertedByPrincipalID sql.NullString
+	var acceptedAt sql.NullTime
 	if err := row.Scan(
 		fingerprint,
 		&record.ID, &record.WorkspaceID, &record.ApplicationID, &record.CreatedByPrincipalID,
 		&record.State, &record.ReportFormat.Name, &reportVersion, &originalFilename,
 		&expectedSize, &expectedDigest, &record.MaxBytes, &record.UploadExpiresAt,
 		&record.CreatedAt, &record.UpdatedAt,
+		&analysisKind, &targetType, &targetID, &targetRelationshipID,
+		&assertionSource, &assertedByPrincipalID, &acceptedAt,
 	); err != nil {
 		return Import{}, err
 	}
@@ -609,6 +667,15 @@ func scanImport(row rowScanner, fingerprint *[]byte) (Import, error) {
 	}
 	if len(expectedDigest) != 0 {
 		record.ExpectedSHA256 = hex.EncodeToString(expectedDigest)
+	}
+	if analysisKind.Valid && targetType.Valid && targetID.Valid && targetRelationshipID.Valid &&
+		assertionSource.Valid && assertedByPrincipalID.Valid && acceptedAt.Valid {
+		record.AnalysisContext = &AnalysisContext{
+			AnalysisKind: analysisKind.String, TargetType: targetType.String,
+			TargetID: targetID.String, TargetRelationshipID: targetRelationshipID.String,
+			AssertionSource: assertionSource.String, AssertedByPrincipalID: assertedByPrincipalID.String,
+			AcceptedAt: acceptedAt.Time,
+		}
 	}
 	return record, nil
 }

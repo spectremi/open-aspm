@@ -21,7 +21,7 @@ fingerprint. Evaluation time is audit metadata and does not change replay
 identity. Exact replay returns the originally stored outcome. Reusing the same
 key for different inputs is a conflict.
 
-Version-one reason codes are stored once in canonical order:
+Supported reason codes are stored once in canonical order:
 
 ```text
 target_identity_unknown
@@ -39,10 +39,10 @@ The database constrains the allowed values, uniqueness, and ordering. The
 runtime role requires only `SELECT` and `INSERT`; outcomes cannot be updated in
 place.
 
-The import worker invokes `correlation-dispatch` version `1` after persisting
-each SARIF normalization. This dispatch step requires a stable catalog target
-identity and a known analysis kind before selecting a fingerprint family. The
-current ingestion contract supplies neither, so it deterministically records:
+The import worker invokes `correlation-dispatch` after persisting each SARIF
+normalization. This dispatch step requires a stable catalog target identity and
+a known analysis kind before selecting a fingerprint family. An Import without
+accepted analysis context retains version `1` and deterministically records:
 
 ```text
 target_identity_unknown
@@ -53,17 +53,33 @@ It does not add scanner-, rule-, package-, vulnerability-, location-, or
 source-context reasons before an analysis family has been selected, because
 those inputs are not required by every fingerprint family.
 
+When the internal Import model contains an accepted `sast + repository`
+context, dispatch uses version `2` and removes only the target and analysis
+blockers. The current SARIF adapter has no server-owned scanner-family mapping
+or safe stable source context, so it deterministically records:
+
+```text
+scanner_family_unknown
+source_context_unknown
+```
+
+Version `1` remains selected for unmapped Imports so an in-flight job retry
+does not produce a second interpretation after deployment. Version `2` is
+selected only for the new mapped input domain. Historical outcomes remain
+immutable.
+
 ## Deliberately deferred
 
-This slice does not create Findings or correlation fingerprints. Current SARIF
-imports provide only an Application identity and conservatively retain unknown
-scanner family and analysis kind. Treating an untrusted artifact URI as a
-Repository identity would violate ADR-0002 and ADR-0007.
+This slice does not create Findings or correlation fingerprints. Mapped SARIF
+imports can provide an authorized Repository identity and SAST analysis kind,
+but still conservatively retain unknown scanner family and source context.
+Treating an untrusted artifact URI as either identity would violate ADR-0002
+and ADR-0007.
 
-A later contract must provide an authorized stable target identity and analysis
-kind before a supported family can create a fingerprint and attach an
-Observation to a Finding. The authorized query API is not wired to these
-outcomes yet.
+A later slice must provide a server-owned scanner-family mapping and a safe,
+stable source-context rule before the SAST family can create a fingerprint and
+attach an Observation to a Finding. The authorized query API is not wired to
+these outcomes yet.
 
 See [ADR-0007](../adr/0007-finding-identity-and-fingerprint-versioning.md) for
 the identity decision and [SARIF normalization](../normalization/sarif.md) for

@@ -65,6 +65,9 @@ func (store *PostgresStore) BeginProcessing(
 
 	var source ProcessingSource
 	var formatVersion, backendVersion sql.NullString
+	var analysisKind, targetType, targetID, targetRelationshipID sql.NullString
+	var assertionSource, assertedByPrincipalID sql.NullString
+	var acceptedAt sql.NullTime
 	var digest []byte
 	var importState ImportState
 	var failureCode sql.NullString
@@ -74,13 +77,18 @@ func (store *PostgresStore) BeginProcessing(
 		       imp.report_format_name, imp.report_format_version, imp.max_bytes,
 		       artifact.id, artifact.storage_backend, artifact.storage_key,
 		       artifact.storage_version, artifact.backend_version,
-		       artifact.size_bytes, artifact.sha256, artifact.committed_at
+		       artifact.size_bytes, artifact.sha256, artifact.committed_at,
+		       context.analysis_kind, context.target_type, context.target_id,
+		       context.target_relationship_id, context.assertion_source,
+		       context.asserted_by_principal_id, context.accepted_at
 		FROM open_aspm.operations AS op
 		JOIN open_aspm.imports AS imp
 		  ON imp.workspace_id = op.workspace_id AND imp.id = op.import_id
 		JOIN open_aspm.raw_artifacts AS artifact
 		  ON artifact.workspace_id = imp.workspace_id AND artifact.import_id = imp.id
 		 AND artifact.state = 'committed'
+		LEFT JOIN open_aspm.import_analysis_contexts AS context
+		  ON context.workspace_id = imp.workspace_id AND context.import_id = imp.id
 		WHERE op.workspace_id = $1 AND op.id = $2 AND op.import_id = $3
 		  AND op.created_by_principal_id = $4 AND op.kind = $5
 		FOR UPDATE OF op, imp`,
@@ -93,6 +101,8 @@ func (store *PostgresStore) BeginProcessing(
 		&source.RawArtifactID, &source.StorageBackend, &source.StorageKey,
 		&source.StorageVersion, &backendVersion,
 		&source.SizeBytes, &digest, &source.ReceivedAt,
+		&analysisKind, &targetType, &targetID, &targetRelationshipID,
+		&assertionSource, &assertedByPrincipalID, &acceptedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProcessingSource{}, ErrProcessingNotFound
@@ -115,6 +125,15 @@ func (store *PostgresStore) BeginProcessing(
 	source.ReportFormat.Version = formatVersion.String
 	source.BackendVersion = backendVersion.String
 	source.SHA256 = hex.EncodeToString(digest)
+	if analysisKind.Valid && targetType.Valid && targetID.Valid && targetRelationshipID.Valid &&
+		assertionSource.Valid && assertedByPrincipalID.Valid && acceptedAt.Valid {
+		source.AnalysisContext = &AnalysisContext{
+			AnalysisKind: analysisKind.String, TargetType: targetType.String,
+			TargetID: targetID.String, TargetRelationshipID: targetRelationshipID.String,
+			AssertionSource: assertionSource.String, AssertedByPrincipalID: assertedByPrincipalID.String,
+			AcceptedAt: acceptedAt.Time,
+		}
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE open_aspm.operations

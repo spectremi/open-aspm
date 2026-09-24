@@ -145,6 +145,14 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 	if terminal := terminalOutcome(source.State, source.FailureCode); terminal != nil {
 		return *terminal
 	}
+	if source.AnalysisContext != nil &&
+		(source.AnalysisContext.AnalysisKind != ingestion.AnalysisKindSAST ||
+			source.AnalysisContext.TargetType != ingestion.AnalysisTargetRepository ||
+			source.AnalysisContext.TargetID == "" || source.AnalysisContext.TargetRelationshipID == "" ||
+			source.AnalysisContext.AssertionSource != ingestion.AssertionSourceAPIClient ||
+			source.AnalysisContext.AssertedByPrincipalID == "" || source.AnalysisContext.AcceptedAt.IsZero()) {
+		return processor.permanent(identity, "processing-state-conflict", "Import analysis context is inconsistent")
+	}
 	if source.ReportFormat.Name != sarif.Format ||
 		(source.ReportFormat.Version != "" && source.ReportFormat.Version != sarif.FormatVersion) {
 		return processor.permanent(identity, "unsupported-report-format", "The report format is not supported")
@@ -249,8 +257,9 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 				WorkspaceID: source.WorkspaceID, ObservationID: storedObservation.ID,
 				NormalizerName:            storedNormalization.NormalizerName,
 				NormalizerVersion:         storedNormalization.NormalizerVersion,
-				StableTargetIdentityKnown: false,
+				StableTargetIdentityKnown: source.AnalysisContext != nil,
 				AnalysisKind:              scan.Scope.AnalysisKind,
+				ScannerFamily:             scan.Scope.ScannerFamily,
 				EvaluatedAt:               processor.timestamp(storedNormalization.NormalizedAt),
 			})
 			if err != nil {
@@ -478,6 +487,10 @@ func mapScan(
 		SourcePointer: run.SourcePointer, SourceStartedAt: startedAt, SourceEndedAt: endedAt,
 		RecordedAt: recordedAt,
 		Scope:      ingestion.ScanScope{SchemaVersion: 1, ScannerFamily: "unknown", AnalysisKind: "unknown"},
+	}
+	if source.AnalysisContext != nil {
+		spec.AnalysisContextImportID = source.ImportID
+		spec.Scope.AnalysisKind = source.AnalysisContext.AnalysisKind
 	}
 	if run.AutomationDetails != nil {
 		spec.AutomationID = run.AutomationDetails.ID
