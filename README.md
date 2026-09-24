@@ -50,7 +50,8 @@ Implemented and tested internally:
   unknown scan result, completeness, and scope values; and
 - an idempotent `import.process` application handler that reauthorizes queued
   work, verifies BlobStore evidence, records parser diagnostics, and persists
-  SARIF Scan and Observation output with terminal Import/Operation state;
+  SARIF Scan, Observation, normalization, and explicit correlation-dispatch
+  output with terminal Import/Operation state;
 - a deterministic, versioned SARIF Observation normalization that preserves
   source severity separately and keeps unsupported category semantics unknown;
   and
@@ -67,7 +68,7 @@ Not yet available as an end-to-end user workflow:
 
 - authenticated ingestion HTTP routes from the published OpenAPI contract;
 - runtime registration and an operator command for the import worker;
-- correlation execution and durable Finding state;
+- successful fingerprint correlation and durable Finding state;
 - authorized ingestion and finding query APIs; and
 - the web interface.
 

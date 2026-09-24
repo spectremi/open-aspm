@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spectremi/open-aspm/internal/blobstore"
+	"github.com/spectremi/open-aspm/internal/correlation"
 	"github.com/spectremi/open-aspm/internal/finding"
 	"github.com/spectremi/open-aspm/internal/ingestion"
 	"github.com/spectremi/open-aspm/internal/jobqueue"
@@ -42,6 +43,10 @@ type observationNormalizer interface {
 	Normalize(finding.ObservationSpec, time.Time) (finding.NormalizationSpec, error)
 }
 
+type correlationRecorder interface {
+	RecordUncorrelated(context.Context, correlation.UncorrelatedSpec) (correlation.StoredOutcome, error)
+}
+
 type blobReader interface {
 	Open(context.Context, blobstore.Key) (io.ReadCloser, blobstore.Metadata, error)
 }
@@ -64,6 +69,7 @@ type Processor struct {
 	blobs        blobReader
 	parser       sarifParser
 	normalizer   observationNormalizer
+	correlations correlationRecorder
 	authorizer   ingestion.Authorizer
 	config       Config
 	now          func() time.Time
@@ -77,17 +83,20 @@ func New(
 	blobs blobReader,
 	parser sarifParser,
 	normalizer observationNormalizer,
+	correlations correlationRecorder,
 	authorizer ingestion.Authorizer,
 	config Config,
 ) (*Processor, error) {
 	if store == nil || scans == nil || observations == nil || blobs == nil || parser == nil || normalizer == nil ||
+		correlations == nil ||
 		authorizer == nil ||
 		config.StorageBackend == "" || config.ProcessingTimeout <= 0 || config.RetryMaximumAge <= 0 {
 		return nil, errors.New("invalid import processor configuration")
 	}
 	return &Processor{
 		store: store, scans: scans, observations: observations, blobs: blobs,
-		parser: parser, normalizer: normalizer, authorizer: authorizer, config: config,
+		parser: parser, normalizer: normalizer, correlations: correlations,
+		authorizer: authorizer, config: config,
 		now: time.Now,
 		random: func(buffer []byte) error {
 			_, err := rand.Read(buffer)
@@ -97,7 +106,8 @@ func New(
 }
 
 // Handle validates the internal queue contract, reauthorizes the delayed work,
-// verifies immutable evidence, and persists deterministic parsed and normalized output.
+// verifies immutable evidence, and persists deterministic parsed, normalized,
+// and correlation output.
 func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobqueue.Outcome {
 	identity, err := decodeJob(job)
 	if err != nil {
@@ -189,7 +199,8 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 		if err != nil {
 			return processor.retry(job, identity, "identifier-generation-failed", "A secure record identifier could not be generated")
 		}
-		storedScan, err := processor.scans.RecordScan(ctx, mapScan(source, document, run, scanID, recordedAt))
+		scan := mapScan(source, document, run, scanID, recordedAt)
+		storedScan, err := processor.scans.RecordScan(ctx, scan)
 		if err != nil {
 			if errors.Is(err, ingestion.ErrScanConflict) {
 				return processor.permanent(identity, "scan-output-conflict", "Scan output conflicts with retained history")
@@ -223,7 +234,8 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 			if err != nil {
 				return processor.permanent(identity, "normalization-output-invalid", "Observation normalization failed")
 			}
-			if _, err := processor.observations.RecordNormalization(ctx, normalized); err != nil {
+			storedNormalization, err := processor.observations.RecordNormalization(ctx, normalized)
+			if err != nil {
 				switch {
 				case errors.Is(err, finding.ErrNormalizationConflict):
 					return processor.permanent(identity, "normalization-output-conflict", "Normalization output conflicts with retained history")
@@ -231,6 +243,27 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 					return processor.permanent(identity, "normalization-output-invalid", "Normalization output is outside supported limits")
 				default:
 					return processor.retry(job, identity, "database-unavailable", "Normalization output could not be stored")
+				}
+			}
+			outcome, err := correlation.NewDispatchUncorrelated(correlation.DispatchSpec{
+				WorkspaceID: source.WorkspaceID, ObservationID: storedObservation.ID,
+				NormalizerName:            storedNormalization.NormalizerName,
+				NormalizerVersion:         storedNormalization.NormalizerVersion,
+				StableTargetIdentityKnown: false,
+				AnalysisKind:              scan.Scope.AnalysisKind,
+				EvaluatedAt:               processor.timestamp(storedNormalization.NormalizedAt),
+			})
+			if err != nil {
+				return processor.permanent(identity, "correlation-output-invalid", "Correlation input is outside supported limits")
+			}
+			if _, err := processor.correlations.RecordUncorrelated(ctx, outcome); err != nil {
+				switch {
+				case errors.Is(err, correlation.ErrOutcomeConflict):
+					return processor.permanent(identity, "correlation-output-conflict", "Correlation output conflicts with retained history")
+				case errors.Is(err, correlation.ErrInvalid), errors.Is(err, correlation.ErrNormalizationNotFound):
+					return processor.permanent(identity, "correlation-output-invalid", "Correlation output is outside supported limits")
+				default:
+					return processor.retry(job, identity, "database-unavailable", "Correlation output could not be stored")
 				}
 			}
 		}

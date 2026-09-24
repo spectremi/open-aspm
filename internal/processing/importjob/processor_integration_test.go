@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/spectremi/open-aspm/internal/blobstore/filesystem"
+	"github.com/spectremi/open-aspm/internal/correlation"
 	"github.com/spectremi/open-aspm/internal/database"
 	"github.com/spectremi/open-aspm/internal/finding"
 	"github.com/spectremi/open-aspm/internal/ingestion"
@@ -67,13 +69,14 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 
 	counts := map[string]int{}
 	for name, query := range map[string]string{
-		"parse_outputs":  `SELECT count(*) FROM open_aspm.import_parse_outputs WHERE workspace_id = $1 AND import_id = $2`,
-		"warnings":       `SELECT count(*) FROM open_aspm.import_parse_warnings WHERE workspace_id = $1 AND import_id = $2`,
-		"scans":          `SELECT count(*) FROM open_aspm.scans WHERE workspace_id = $1 AND import_id = $2`,
-		"observations":   `SELECT count(*) FROM open_aspm.observations AS observation JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
-		"normalizations": `SELECT count(*) FROM open_aspm.observation_normalizations AS normalization JOIN open_aspm.observations AS observation ON observation.workspace_id = normalization.workspace_id AND observation.id = normalization.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
-		"locations":      `SELECT count(*) FROM open_aspm.observation_locations AS location JOIN open_aspm.observations AS observation ON observation.workspace_id = location.workspace_id AND observation.id = location.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
-		"fingerprints":   `SELECT count(*) FROM open_aspm.observation_fingerprints AS fingerprint JOIN open_aspm.observations AS observation ON observation.workspace_id = fingerprint.workspace_id AND observation.id = fingerprint.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"parse_outputs":        `SELECT count(*) FROM open_aspm.import_parse_outputs WHERE workspace_id = $1 AND import_id = $2`,
+		"warnings":             `SELECT count(*) FROM open_aspm.import_parse_warnings WHERE workspace_id = $1 AND import_id = $2`,
+		"scans":                `SELECT count(*) FROM open_aspm.scans WHERE workspace_id = $1 AND import_id = $2`,
+		"observations":         `SELECT count(*) FROM open_aspm.observations AS observation JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"normalizations":       `SELECT count(*) FROM open_aspm.observation_normalizations AS normalization JOIN open_aspm.observations AS observation ON observation.workspace_id = normalization.workspace_id AND observation.id = normalization.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"correlation_outcomes": `SELECT count(*) FROM open_aspm.observation_correlation_outcomes AS outcome JOIN open_aspm.observations AS observation ON observation.workspace_id = outcome.workspace_id AND observation.id = outcome.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"locations":            `SELECT count(*) FROM open_aspm.observation_locations AS location JOIN open_aspm.observations AS observation ON observation.workspace_id = location.workspace_id AND observation.id = location.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"fingerprints":         `SELECT count(*) FROM open_aspm.observation_fingerprints AS fingerprint JOIN open_aspm.observations AS observation ON observation.workspace_id = fingerprint.workspace_id AND observation.id = fingerprint.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
 	} {
 		var count int
 		if err := harness.db.QueryRow(query, job.WorkspaceID, importIDFromJob(t, job)).Scan(&count); err != nil {
@@ -83,8 +86,28 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 	}
 	if counts["parse_outputs"] != 1 || counts["warnings"] == 0 || counts["scans"] != 2 ||
 		counts["observations"] != 3 || counts["normalizations"] != 3 ||
-		counts["locations"] != 2 || counts["fingerprints"] != 3 {
+		counts["correlation_outcomes"] != 3 || counts["locations"] != 2 || counts["fingerprints"] != 3 {
 		t.Fatalf("persisted counts = %+v", counts)
+	}
+	var dispatchOutcomes int
+	if err := harness.db.QueryRow(`
+		SELECT count(*) FROM open_aspm.observation_correlation_outcomes AS outcome
+		JOIN open_aspm.observations AS observation
+		  ON observation.workspace_id = outcome.workspace_id
+		 AND observation.id = outcome.observation_id
+		JOIN open_aspm.scans AS scan
+		  ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id
+		WHERE scan.workspace_id = $1 AND scan.import_id = $2
+		  AND outcome.algorithm = 'correlation-dispatch'
+		  AND outcome.algorithm_version = '1'
+		  AND outcome.state = 'uncorrelated'
+		  AND outcome.reason_codes = ARRAY[
+		    'target_identity_unknown', 'analysis_kind_unknown'
+		  ]::varchar(64)[]`, job.WorkspaceID, importIDFromJob(t, job)).Scan(&dispatchOutcomes); err != nil {
+		t.Fatal(err)
+	}
+	if dispatchOutcomes != 3 {
+		t.Fatalf("versioned dispatch outcomes = %d, want 3", dispatchOutcomes)
 	}
 	var supportedMappings int
 	if err := harness.db.QueryRow(`
@@ -130,6 +153,38 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 		UPDATE open_aspm.observation_normalizations SET severity = 'critical'
 		WHERE workspace_id = $1`, job.WorkspaceID); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable normalization output")
+	}
+	if _, err := harness.db.Exec(`
+		UPDATE open_aspm.observation_correlation_outcomes SET state = 'correlated'
+		WHERE workspace_id = $1`, job.WorkspaceID); err == nil {
+		t.Fatal("runtime role unexpectedly updated immutable correlation output")
+	}
+}
+
+func TestImportProcessorReplaysCorrelationAfterCompletionFailure(t *testing.T) {
+	harness := openProcessorHarness(t)
+	report, err := os.ReadFile("../../../testdata/sarif/valid/representative.sarif.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := harness.createImportJob(t, "completion-retry", report)
+	flakyStore := &failOnceCompletionStore{processingStore: harness.store}
+	processor := harness.newProcessor(t, flakyStore)
+
+	first := processor.Handle(context.Background(), job)
+	if first.Kind != jobqueue.OutcomeRetryable || first.Code != "database-unavailable" {
+		t.Fatalf("first Handle() = %+v, want retryable completion failure", first)
+	}
+	if count := harness.correlationOutcomeCount(t, job); count != 3 {
+		t.Fatalf("correlation outcomes after completion failure = %d, want 3", count)
+	}
+
+	second := processor.Handle(context.Background(), job)
+	if second.Kind != jobqueue.OutcomeSucceeded {
+		t.Fatalf("second Handle() = %+v, want success", second)
+	}
+	if count := harness.correlationOutcomeCount(t, job); count != 3 {
+		t.Fatalf("correlation outcomes after replay = %d, want 3", count)
 	}
 }
 
@@ -179,9 +234,16 @@ func TestImportProcessorDoesNotCrossWorkspaceBoundary(t *testing.T) {
 }
 
 type processorHarness struct {
-	db        *sql.DB
-	service   *ingestion.Service
-	processor *Processor
+	db           *sql.DB
+	service      *ingestion.Service
+	processor    *Processor
+	store        *ingestion.PostgresStore
+	observations *finding.PostgresStore
+	correlations *correlation.PostgresStore
+	blobs        *filesystem.Store
+	parser       *sarif.Parser
+	authorizer   ingestion.Authorizer
+	config       Config
 }
 
 func openProcessorHarness(t *testing.T) *processorHarness {
@@ -264,6 +326,7 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.scans, open_aspm.scan_scopes TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observations, open_aspm.observation_locations, open_aspm.observation_fingerprints TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_correlation_outcomes TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_outputs, open_aspm.import_parse_warnings TO %s", runtimeIdentifier),
 	}
 	for _, grant := range grants {
@@ -287,6 +350,10 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	correlationStore, err := correlation.NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -305,13 +372,63 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	processor, err := New(store, store, observationStore, blobs, parser, sarifnormalization.New(), authorizer, Config{
-		StorageBackend: "filesystem-test", ProcessingTimeout: time.Minute, RetryMaximumAge: time.Hour,
-	})
+	harness := &processorHarness{
+		db: db, service: service, store: store, observations: observationStore,
+		correlations: correlationStore, blobs: blobs, parser: parser, authorizer: authorizer,
+		config: Config{
+			StorageBackend: "filesystem-test", ProcessingTimeout: time.Minute, RetryMaximumAge: time.Hour,
+		},
+	}
+	harness.processor = harness.newProcessor(t, store)
+	return harness
+}
+
+func (harness *processorHarness) newProcessor(t *testing.T, store processingStore) *Processor {
+	t.Helper()
+	processor, err := New(store, harness.store, harness.observations, harness.blobs, harness.parser,
+		sarifnormalization.New(), harness.correlations, harness.authorizer, harness.config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &processorHarness{db: db, service: service, processor: processor}
+	return processor
+}
+
+func (harness *processorHarness) correlationOutcomeCount(t *testing.T, job jobqueue.Job) int {
+	t.Helper()
+	var count int
+	err := harness.db.QueryRow(`
+		SELECT count(*)
+		FROM open_aspm.observation_correlation_outcomes AS outcome
+		JOIN open_aspm.observations AS observation
+		  ON observation.workspace_id = outcome.workspace_id
+		 AND observation.id = outcome.observation_id
+		JOIN open_aspm.scans AS scan
+		  ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id
+		WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		job.WorkspaceID, importIDFromJob(t, job),
+	).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+type failOnceCompletionStore struct {
+	processingStore
+	failed bool
+}
+
+func (store *failOnceCompletionStore) CompleteProcessing(
+	ctx context.Context,
+	identity ingestion.ProcessingIdentity,
+	result ingestion.ProcessingResult,
+	finishedAt time.Time,
+) error {
+	if !store.failed {
+		store.failed = true
+		return errors.New("synthetic completion failure")
+	}
+	return store.processingStore.CompleteProcessing(ctx, identity, result, finishedAt)
 }
 
 func (harness *processorHarness) createImportJob(t *testing.T, suffix string, report []byte) jobqueue.Job {
