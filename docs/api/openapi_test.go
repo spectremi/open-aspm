@@ -7,7 +7,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 )
 
-func TestIngestionContractIsValidOpenAPI(t *testing.T) {
+func TestContractIsValidOpenAPI(t *testing.T) {
 	loader := openapi3.NewLoader()
 	document, err := loader.LoadFromFile("openapi.yaml")
 	if err != nil {
@@ -15,6 +15,87 @@ func TestIngestionContractIsValidOpenAPI(t *testing.T) {
 	}
 	if err := document.Validate(context.Background()); err != nil {
 		t.Fatalf("validate OpenAPI document: %v", err)
+	}
+}
+
+func TestCatalogWorkflowContract(t *testing.T) {
+	loader := openapi3.NewLoader()
+	document, err := loader.LoadFromFile("openapi.yaml")
+	if err != nil {
+		t.Fatalf("load OpenAPI document: %v", err)
+	}
+
+	repositories := document.Paths.Find("/workspaces/{workspace_id}/repositories")
+	if repositories == nil || repositories.Post == nil {
+		t.Fatal("create repository operation is missing")
+	}
+	assertRequiredHeader(t, repositories.Post, "Idempotency-Key")
+	assertCapability(t, repositories.Post, "catalog:repositories:create")
+	if repositories.Post.Responses.Value("201") == nil {
+		t.Error("create repository must return 201")
+	}
+	if repositories.Post.Responses.Value("409") == nil {
+		t.Error("create repository must document idempotency conflict")
+	}
+
+	link := document.Paths.Find("/workspaces/{workspace_id}/applications/{application_id}/repositories/{repository_id}")
+	if link == nil || link.Put == nil {
+		t.Fatal("application repository link operation is missing")
+	}
+	assertCapability(t, link.Put, "catalog:application-repositories:link")
+	if link.Put.Responses.Value("200") == nil {
+		t.Error("link replay must return the existing relationship with 200")
+	}
+	if link.Put.Responses.Value("201") == nil {
+		t.Error("a newly created link must return 201")
+	}
+	if link.Put.Parameters.GetByInAndName("header", "Idempotency-Key") != nil {
+		t.Error("link convergence must not require an idempotency header")
+	}
+}
+
+func TestCreateImportAnalysisContextContract(t *testing.T) {
+	loader := openapi3.NewLoader()
+	document, err := loader.LoadFromFile("openapi.yaml")
+	if err != nil {
+		t.Fatalf("load OpenAPI document: %v", err)
+	}
+
+	request := document.Components.Schemas["CreateImportRequest"]
+	if request == nil || request.Value == nil {
+		t.Fatal("CreateImportRequest schema is missing")
+	}
+	context := request.Value.Properties["analysis_context"]
+	if context == nil || context.Value == nil {
+		t.Fatal("create import analysis_context is missing")
+	}
+	for _, name := range request.Value.Required {
+		if name == "analysis_context" {
+			t.Error("analysis_context must remain optional")
+		}
+	}
+
+	response := document.Components.Schemas["Import"]
+	if response == nil || response.Value == nil ||
+		response.Value.Properties["analysis_context"] == nil {
+		t.Fatal("Import response must expose accepted analysis_context provenance")
+	}
+
+	analysis := document.Components.Schemas["AnalysisContextRequest"]
+	if analysis == nil || analysis.Value == nil {
+		t.Fatal("AnalysisContextRequest schema is missing")
+	}
+	kind := analysis.Value.Properties["analysis_kind"]
+	if kind == nil || kind.Value == nil || kind.Value.Const != "sast" {
+		t.Errorf("analysis_kind const = %#v, want sast", kind)
+	}
+	target := document.Components.Schemas["AnalysisTarget"]
+	if target == nil || target.Value == nil {
+		t.Fatal("AnalysisTarget schema is missing")
+	}
+	targetType := target.Value.Properties["type"]
+	if targetType == nil || targetType.Value == nil || targetType.Value.Const != "repository" {
+		t.Errorf("analysis target type const = %#v, want repository", targetType)
 	}
 }
 
@@ -113,4 +194,22 @@ func assertRequiredHeader(t *testing.T, operation *openapi3.Operation, name stri
 	if parameter == nil || !parameter.Required {
 		t.Errorf("%s must be a required header", name)
 	}
+}
+
+func assertCapability(t *testing.T, operation *openapi3.Operation, want string) {
+	t.Helper()
+	value, ok := operation.Extensions["x-required-capabilities"]
+	if !ok {
+		t.Fatalf("operation has no x-required-capabilities")
+	}
+	capabilities, ok := value.([]any)
+	if !ok {
+		t.Fatalf("x-required-capabilities has unexpected value %#v", value)
+	}
+	for _, capability := range capabilities {
+		if capability == want {
+			return
+		}
+	}
+	t.Errorf("x-required-capabilities = %#v, want %q", capabilities, want)
 }
