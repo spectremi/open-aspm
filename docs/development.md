@@ -48,10 +48,10 @@ OPEN_ASPM_TEST_DATABASE_ADMIN_URL='postgres://postgres:postgres@localhost/postgr
 
 Never point this test at a shared or production-like database.
 
-The queue and import migrations add the minimal workspace, application,
-reservation, job, and attempt tables. After migrations, grant the runtime role
-only the DML needed by these implementations (substitute the deployment's role
-name):
+The current migrations add the minimal workspace, application, ingestion,
+queue, Catalog, and authorization tables. After migrations, grant the runtime
+role only the DML needed by these implementations (substitute the deployment's
+role name):
 
 ```sql
 GRANT SELECT ON open_aspm.workspaces TO open_aspm_runtime;
@@ -76,6 +76,14 @@ GRANT SELECT, INSERT ON open_aspm.repositories TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.repository_create_idempotency TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.application_repository_relationships TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_analysis_contexts TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.principals TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.workspace_memberships TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.service_accounts TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.role_capabilities TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.role_bindings TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.api_tokens TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.api_token_capabilities TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.api_token_application_scopes TO open_aspm_runtime;
 ```
 
 The ingestion service implements the `createImport` reservation, streaming
@@ -141,6 +149,14 @@ Application-to-Repository relationship, asserting principal, assertion source,
 and acceptance time. It participates in createImport idempotency and every Scan
 derived from the artifact references it. This is implemented at the application
 and worker layers but is not accepted by the current HTTP server yet.
+
+The authorization foundation persists principals, workspace memberships,
+service-account expiry, capability-bearing roles, temporal workspace or
+Application role bindings, and API-token capability and Application scopes.
+Its evaluator denies unknown, inactive, expired, revoked, cross-workspace, and
+out-of-scope decisions and treats token scope only as a restriction on current
+role grants. Bearer-token verification, initial bootstrap, HTTP integration,
+and operator-facing identity management are not implemented by this stage.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,
