@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spectremi/open-aspm/internal/blobstore"
+	"github.com/spectremi/open-aspm/internal/catalog"
 )
 
 func TestReserveAuthorizesAndBuildsDeterministicReservation(t *testing.T) {
@@ -76,14 +77,108 @@ func TestReserveAuthorizesAndBuildsDeterministicReservation(t *testing.T) {
 func TestReserveDenialPerformsNoStoreWrite(t *testing.T) {
 	authorizer := &recordingAuthorizer{err: ErrForbidden}
 	store := &recordingStore{}
-	service := newTestService(t, store, authorizer)
+	resolver := &recordingTargetResolver{}
+	service := newTestServiceWithTargets(t, store, authorizer, resolver)
+	request := validRequest()
+	request.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+	}
 
-	_, err := service.Reserve(context.Background(), validRequest())
+	_, err := service.Reserve(context.Background(), request)
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("Reserve() error = %v, want ErrForbidden", err)
 	}
 	if store.calls != 0 {
 		t.Fatalf("store calls = %d, want zero", store.calls)
+	}
+	if len(resolver.requests) != 0 {
+		t.Fatalf("target resolution requests = %+v, want none", resolver.requests)
+	}
+}
+
+func TestReserveAcceptsResolvedAnalysisContext(t *testing.T) {
+	authorizer := &recordingAuthorizer{}
+	store := &recordingStore{}
+	fixedTime := time.Date(2026, time.September, 24, 15, 0, 0, 0, time.UTC)
+	resolver := &recordingTargetResolver{result: catalog.ResolvedRepositoryTarget{
+		WorkspaceID: "workspace-a", ApplicationID: "application-a",
+		RepositoryID: "repository-a", RelationshipID: "relationship-a",
+		ValidFrom:  time.Date(2026, time.September, 24, 14, 0, 0, 0, time.UTC),
+		ResolvedAt: fixedTime,
+	}}
+	service := newTestServiceWithTargets(t, store, authorizer, resolver)
+	service.now = func() time.Time { return fixedTime }
+	request := validRequest()
+	request.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+	}
+
+	result, err := service.Reserve(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	if len(resolver.requests) != 1 || resolver.requests[0] != (catalog.ResolveRepositoryTargetRequest{
+		WorkspaceID: "workspace-a", ApplicationID: "application-a", RepositoryID: "repository-a",
+	}) {
+		t.Fatalf("target resolution requests = %+v", resolver.requests)
+	}
+	context := result.Import.AnalysisContext
+	if context == nil || context.AnalysisKind != AnalysisKindSAST ||
+		context.TargetType != AnalysisTargetRepository || context.TargetID != "repository-a" ||
+		context.TargetRelationshipID != "relationship-a" || context.AssertionSource != AssertionSourceAPIClient ||
+		context.AssertedByPrincipalID != "principal-a" || !context.AcceptedAt.Equal(fixedTime) {
+		t.Fatalf("accepted analysis context = %+v", context)
+	}
+	if store.spec.Import.AnalysisContext != context {
+		t.Fatal("accepted analysis context was not passed to the ingestion store")
+	}
+}
+
+func TestReserveConcealsUnavailableAnalysisTarget(t *testing.T) {
+	store := &recordingStore{}
+	resolver := &recordingTargetResolver{err: catalog.ErrRepositoryTargetNotFound}
+	service := newTestServiceWithTargets(t, store, &recordingAuthorizer{}, resolver)
+	request := validRequest()
+	request.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+	}
+
+	if _, err := service.Reserve(context.Background(), request); !errors.Is(err, ErrAnalysisTargetNotFound) {
+		t.Fatalf("Reserve() error = %v, want ErrAnalysisTargetNotFound", err)
+	}
+	if store.calls != 0 {
+		t.Fatalf("store calls = %d, want zero", store.calls)
+	}
+}
+
+func TestReserveReplaysAcceptedContextWithoutReresolvingCatalog(t *testing.T) {
+	historical := Reservation{Import: Import{
+		ID: "import-a", WorkspaceID: "workspace-a", ApplicationID: "application-a",
+		AnalysisContext: &AnalysisContext{
+			AnalysisKind: AnalysisKindSAST, TargetType: AnalysisTargetRepository,
+			TargetID: "repository-a", TargetRelationshipID: "relationship-ended",
+		},
+	}}
+	store := &recordingStore{replayResult: historical, replayFound: true}
+	resolver := &recordingTargetResolver{err: catalog.ErrRepositoryTargetNotFound}
+	service := newTestServiceWithTargets(t, store, &recordingAuthorizer{}, resolver)
+	request := validRequest()
+	request.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+	}
+
+	replayed, err := service.Reserve(context.Background(), request)
+	if err != nil || replayed.Import.AnalysisContext == nil ||
+		replayed.Import.AnalysisContext.TargetRelationshipID != "relationship-ended" {
+		t.Fatalf("Reserve() replay = (%+v, %v)", replayed, err)
+	}
+	if len(resolver.requests) != 0 || store.calls != 0 || store.replayCalls != 1 {
+		t.Fatalf("replay side effects = resolver %d, reserve %d, replay %d",
+			len(resolver.requests), store.calls, store.replayCalls)
 	}
 }
 
@@ -107,6 +202,24 @@ func TestReserveValidatesContractFields(t *testing.T) {
 			request.ExpectedSHA256 = "4F7F2E849FCB4517F07BCA75F0CB56D042DA07F86F9F86C34D828B8E25F0107A"
 		}, wantErr: ErrInvalid},
 		{name: "short digest", mutate: func(request *ReserveRequest) { request.ExpectedSHA256 = "abcd" }, wantErr: ErrInvalid},
+		{name: "analysis kind", mutate: func(request *ReserveRequest) {
+			request.AnalysisContext = &AnalysisContextRequest{
+				AnalysisKind: "sca",
+				Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+			}
+		}, wantErr: ErrInvalid},
+		{name: "analysis target type", mutate: func(request *ReserveRequest) {
+			request.AnalysisContext = &AnalysisContextRequest{
+				AnalysisKind: AnalysisKindSAST,
+				Target:       AnalysisTargetRequest{Type: "application", ID: "repository-a"},
+			}
+		}, wantErr: ErrInvalid},
+		{name: "analysis target id", mutate: func(request *ReserveRequest) {
+			request.AnalysisContext = &AnalysisContextRequest{
+				AnalysisKind: AnalysisKindSAST,
+				Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: " x"},
+			}
+		}, wantErr: ErrInvalid},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -149,6 +262,18 @@ func TestRequestFingerprintUsesValidatedSemantics(t *testing.T) {
 	if first == third {
 		t.Fatal("different validated request fields produced the same fingerprint")
 	}
+	withContext := request
+	withContext.AnalysisContext = &AnalysisContextRequest{
+		AnalysisKind: AnalysisKindSAST,
+		Target:       AnalysisTargetRequest{Type: AnalysisTargetRepository, ID: "repository-a"},
+	}
+	fourth, err := fingerprintRequest(withContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == fourth {
+		t.Fatal("analysis context did not participate in the request fingerprint")
+	}
 }
 
 func TestNewServiceRejectsUnsafeConfiguration(t *testing.T) {
@@ -170,10 +295,18 @@ func TestNewServiceRejectsUnsafeConfiguration(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := NewService(&recordingStore{}, &recordingBlobStore{}, &recordingAuthorizer{}, test.config); !errors.Is(err, ErrInvalid) {
+			if _, err := NewService(
+				&recordingStore{}, &recordingBlobStore{}, &recordingAuthorizer{},
+				&recordingTargetResolver{}, test.config,
+			); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("NewService() error = %v, want ErrInvalid", err)
 			}
 		})
+	}
+	if _, err := NewService(
+		&recordingStore{}, &recordingBlobStore{}, &recordingAuthorizer{}, nil, valid,
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("NewService() with nil target resolver error = %v, want ErrInvalid", err)
 	}
 }
 
@@ -190,6 +323,11 @@ func (authorizer *recordingAuthorizer) Authorize(_ context.Context, request Auth
 type recordingStore struct {
 	calls          int
 	spec           reserveSpec
+	replayCalls    int
+	replaySpec     reservationReplaySpec
+	replayResult   Reservation
+	replayFound    bool
+	replayErr      error
 	beginCalls     int
 	beginSpec      beginUploadSpec
 	beginResult    uploadSession
@@ -204,6 +342,15 @@ type recordingStore struct {
 	completeSpec   completeSpec
 	completeResult Completion
 	completeErr    error
+}
+
+func (store *recordingStore) ReplayReservation(
+	_ context.Context,
+	spec reservationReplaySpec,
+) (Reservation, bool, error) {
+	store.replayCalls++
+	store.replaySpec = spec
+	return store.replayResult, store.replayFound, store.replayErr
 }
 
 func TestUploadAuthorizesStreamsAndCommitsVerifiedMetadata(t *testing.T) {
@@ -602,7 +749,17 @@ func (store *recordingStore) Reserve(_ context.Context, spec reserveSpec) (Reser
 
 func newTestService(t *testing.T, store ingestionStore, authorizer Authorizer) *Service {
 	t.Helper()
-	service, err := NewService(store, &recordingBlobStore{statErr: blobstore.ErrNotFound}, authorizer, Config{
+	return newTestServiceWithTargets(t, store, authorizer, &recordingTargetResolver{})
+}
+
+func newTestServiceWithTargets(
+	t *testing.T,
+	store ingestionStore,
+	authorizer Authorizer,
+	targets catalog.RepositoryTargetResolver,
+) *Service {
+	t.Helper()
+	service, err := NewService(store, &recordingBlobStore{statErr: blobstore.ErrNotFound}, authorizer, targets, Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
 		StorageBackend: "test", ProcessMaxAttempts: 3,
@@ -655,7 +812,7 @@ func newUploadTestService(
 	key blobstore.Key,
 ) *Service {
 	t.Helper()
-	service, err := NewService(store, blobs, authorizer, Config{
+	service, err := NewService(store, blobs, authorizer, &recordingTargetResolver{}, Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
 		StorageBackend: "test", ProcessMaxAttempts: 3,
@@ -672,4 +829,18 @@ func newUploadTestService(
 	}
 	service.newBlobKey = func() (blobstore.Key, error) { return key, nil }
 	return service
+}
+
+type recordingTargetResolver struct {
+	requests []catalog.ResolveRepositoryTargetRequest
+	result   catalog.ResolvedRepositoryTarget
+	err      error
+}
+
+func (resolver *recordingTargetResolver) ResolveActiveRepositoryTarget(
+	_ context.Context,
+	request catalog.ResolveRepositoryTargetRequest,
+) (catalog.ResolvedRepositoryTarget, error) {
+	resolver.requests = append(resolver.requests, request)
+	return resolver.result, resolver.err
 }

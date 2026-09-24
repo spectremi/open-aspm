@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spectremi/open-aspm/internal/blobstore"
+	"github.com/spectremi/open-aspm/internal/catalog"
 )
 
 // AuthorizationRequest is the complete capability and resource scope checked
@@ -27,6 +28,7 @@ type Authorizer interface {
 }
 
 type reservationStore interface {
+	ReplayReservation(context.Context, reservationReplaySpec) (Reservation, bool, error)
 	Reserve(context.Context, reserveSpec) (Reservation, error)
 }
 
@@ -60,6 +62,7 @@ type Service struct {
 	store      ingestionStore
 	blobs      blobWriter
 	authorizer Authorizer
+	targets    catalog.RepositoryTargetResolver
 	config     Config
 	now        func() time.Time
 	random     func([]byte) error
@@ -67,8 +70,14 @@ type Service struct {
 }
 
 // NewService validates dependencies and policy.
-func NewService(store ingestionStore, blobs blobWriter, authorizer Authorizer, config Config) (*Service, error) {
-	if store == nil || blobs == nil || authorizer == nil || config.MaxUploadBytes <= 0 ||
+func NewService(
+	store ingestionStore,
+	blobs blobWriter,
+	authorizer Authorizer,
+	targets catalog.RepositoryTargetResolver,
+	config Config,
+) (*Service, error) {
+	if store == nil || blobs == nil || authorizer == nil || targets == nil || config.MaxUploadBytes <= 0 ||
 		config.UploadReservationTTL <= 0 || config.UploadTimeout <= 0 ||
 		config.IdempotencyRetention < minimumRetention ||
 		!storageBackendPattern.MatchString(config.StorageBackend) ||
@@ -76,7 +85,7 @@ func NewService(store ingestionStore, blobs blobWriter, authorizer Authorizer, c
 		return nil, ErrInvalid
 	}
 	return &Service{
-		store: store, blobs: blobs, authorizer: authorizer, config: config,
+		store: store, blobs: blobs, authorizer: authorizer, targets: targets, config: config,
 		now: time.Now,
 		random: func(buffer []byte) error {
 			_, err := rand.Read(buffer)
@@ -134,9 +143,22 @@ func (service *Service) Reserve(ctx context.Context, request ReserveRequest) (Re
 	}); err != nil {
 		return Reservation{}, fmt.Errorf("authorize import reservation: %w", err)
 	}
+	if err := validateAnalysisContext(request.AnalysisContext); err != nil {
+		return Reservation{}, err
+	}
 	fingerprint, err := fingerprintRequest(request)
 	if err != nil {
 		return Reservation{}, err
+	}
+	replaySpec := reservationReplaySpec{
+		WorkspaceID: request.WorkspaceID, PrincipalID: request.PrincipalID,
+		APIMajorVersion: apiMajorVersion, Operation: operationCreateImport,
+		IdempotencyKey: request.IdempotencyKey, RequestFingerprint: fingerprint,
+	}
+	if replayed, found, err := service.store.ReplayReservation(ctx, replaySpec); err != nil {
+		return Reservation{}, err
+	} else if found {
+		return replayed, nil
 	}
 
 	importID, err := service.randomIdentifier("imp_")
@@ -151,7 +173,41 @@ func (service *Service) Reserve(ctx context.Context, request ReserveRequest) (Re
 	if err != nil {
 		return Reservation{}, fmt.Errorf("generate raw artifact storage key: %w", err)
 	}
+	var resolvedTarget *catalog.ResolvedRepositoryTarget
+	if request.AnalysisContext != nil {
+		resolved, err := service.targets.ResolveActiveRepositoryTarget(ctx, catalog.ResolveRepositoryTargetRequest{
+			WorkspaceID: request.WorkspaceID, ApplicationID: request.ApplicationID,
+			RepositoryID: request.AnalysisContext.Target.ID,
+		})
+		if err != nil {
+			if errors.Is(err, catalog.ErrRepositoryTargetNotFound) || errors.Is(err, catalog.ErrInvalid) {
+				if replayed, found, replayErr := service.store.ReplayReservation(ctx, replaySpec); replayErr != nil {
+					return Reservation{}, replayErr
+				} else if found {
+					return replayed, nil
+				}
+				return Reservation{}, ErrAnalysisTargetNotFound
+			}
+			return Reservation{}, fmt.Errorf("resolve import analysis target: %w", err)
+		}
+		if resolved.WorkspaceID != request.WorkspaceID || resolved.ApplicationID != request.ApplicationID ||
+			resolved.RepositoryID != request.AnalysisContext.Target.ID ||
+			!validOpaqueID(resolved.RelationshipID) || resolved.ValidFrom.IsZero() ||
+			resolved.ResolvedAt.IsZero() || resolved.ResolvedAt.Before(resolved.ValidFrom) {
+			return Reservation{}, errors.New("resolved import analysis target is inconsistent")
+		}
+		resolvedTarget = &resolved
+	}
 	now := service.timestamp()
+	var analysisContext *AnalysisContext
+	if resolvedTarget != nil {
+		analysisContext = &AnalysisContext{
+			AnalysisKind: request.AnalysisContext.AnalysisKind,
+			TargetType:   request.AnalysisContext.Target.Type, TargetID: resolvedTarget.RepositoryID,
+			TargetRelationshipID: resolvedTarget.RelationshipID, AssertionSource: AssertionSourceAPIClient,
+			AssertedByPrincipalID: request.PrincipalID, AcceptedAt: resolvedTarget.ResolvedAt,
+		}
+	}
 	expectedSize := request.ExpectedSize
 	if expectedSize != nil {
 		copied := *expectedSize
@@ -164,7 +220,7 @@ func (service *Service) Reserve(ctx context.Context, request ReserveRequest) (Re
 		OriginalFilename: request.OriginalFilename, ExpectedSize: expectedSize,
 		ExpectedSHA256: request.ExpectedSHA256, MaxBytes: service.config.MaxUploadBytes,
 		UploadExpiresAt: now.Add(service.config.UploadReservationTTL),
-		CreatedAt:       now, UpdatedAt: now,
+		CreatedAt:       now, UpdatedAt: now, AnalysisContext: analysisContext,
 	}
 	return service.store.Reserve(ctx, reserveSpec{
 		Import: created, ArtifactID: artifactID, StorageBackend: service.config.StorageBackend,

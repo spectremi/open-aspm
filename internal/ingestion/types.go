@@ -30,6 +30,9 @@ const (
 	importProcessSchema      = 1
 	minimumRetention         = 24 * time.Hour
 	rawArtifactMediaType     = "application/octet-stream"
+	AnalysisKindSAST         = "sast"
+	AnalysisTargetRepository = "repository"
+	AssertionSourceAPIClient = "api_client"
 )
 
 const (
@@ -40,20 +43,21 @@ const (
 )
 
 var (
-	ErrApplicationNotFound   = errors.New("application not found")
-	ErrForbidden             = errors.New("ingestion operation forbidden")
-	ErrIdempotencyConflict   = errors.New("idempotency key reused for a different request")
-	ErrIdempotencyInProgress = errors.New("idempotent request is already in progress")
-	ErrImportNotFound        = errors.New("import not found")
-	ErrInvalid               = errors.New("invalid ingestion input")
-	ErrTooLarge              = errors.New("report exceeds the import limit")
-	ErrCompletionConflict    = errors.New("import is not ready for completion")
-	ErrUploadConflict        = errors.New("uploaded content conflicts with committed evidence")
-	ErrUploadExpired         = errors.New("upload reservation expired")
-	ErrUploadInProgress      = errors.New("another upload attempt is in progress")
-	ErrUploadLeaseLost       = errors.New("upload attempt lease was lost")
-	ErrUploadMismatch        = errors.New("uploaded content does not match declared expectations")
-	ErrUploadStorage         = errors.New("raw artifact storage backend is unavailable")
+	ErrApplicationNotFound    = errors.New("application not found")
+	ErrAnalysisTargetNotFound = errors.New("analysis target not found")
+	ErrForbidden              = errors.New("ingestion operation forbidden")
+	ErrIdempotencyConflict    = errors.New("idempotency key reused for a different request")
+	ErrIdempotencyInProgress  = errors.New("idempotent request is already in progress")
+	ErrImportNotFound         = errors.New("import not found")
+	ErrInvalid                = errors.New("invalid ingestion input")
+	ErrTooLarge               = errors.New("report exceeds the import limit")
+	ErrCompletionConflict     = errors.New("import is not ready for completion")
+	ErrUploadConflict         = errors.New("uploaded content conflicts with committed evidence")
+	ErrUploadExpired          = errors.New("upload reservation expired")
+	ErrUploadInProgress       = errors.New("another upload attempt is in progress")
+	ErrUploadLeaseLost        = errors.New("upload attempt lease was lost")
+	ErrUploadMismatch         = errors.New("uploaded content does not match declared expectations")
+	ErrUploadStorage          = errors.New("raw artifact storage backend is unavailable")
 )
 
 var (
@@ -93,6 +97,32 @@ type ReportFormat struct {
 	Version string `json:"version,omitempty"`
 }
 
+// AnalysisTargetRequest is an opaque Open ASPM Catalog identity. It never
+// accepts a repository name, URL, provider ID, or report-controlled locator.
+type AnalysisTargetRequest struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// AnalysisContextRequest is an optional client attribution that applies to
+// every source run in one imported artifact.
+type AnalysisContextRequest struct {
+	AnalysisKind string                `json:"analysis_kind"`
+	Target       AnalysisTargetRequest `json:"target"`
+}
+
+// AnalysisContext is the immutable accepted attribution and the exact Catalog
+// relationship that authorized it at reservation time.
+type AnalysisContext struct {
+	AnalysisKind          string
+	TargetType            string
+	TargetID              string
+	TargetRelationshipID  string
+	AssertionSource       string
+	AssertedByPrincipalID string
+	AcceptedAt            time.Time
+}
+
 // ReserveRequest is the validated semantic input to createImport. Empty
 // optional strings mean that the corresponding API field was omitted.
 type ReserveRequest struct {
@@ -104,6 +134,7 @@ type ReserveRequest struct {
 	OriginalFilename string
 	ExpectedSize     *int64
 	ExpectedSHA256   string
+	AnalysisContext  *AnalysisContextRequest
 }
 
 // Import is the durable reservation returned by the application service.
@@ -121,6 +152,7 @@ type Import struct {
 	UploadExpiresAt      time.Time
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+	AnalysisContext      *AnalysisContext
 }
 
 // Reservation reports whether this call created the import. Replays return
@@ -209,6 +241,15 @@ type reserveSpec struct {
 	IdempotencyExpiresAt time.Time
 }
 
+type reservationReplaySpec struct {
+	WorkspaceID        string
+	PrincipalID        string
+	APIMajorVersion    int
+	Operation          string
+	IdempotencyKey     string
+	RequestFingerprint [sha256.Size]byte
+}
+
 type beginUploadSpec struct {
 	PrincipalID    string
 	WorkspaceID    string
@@ -277,6 +318,17 @@ func validateAuthorizationScope(request ReserveRequest) error {
 	return nil
 }
 
+func validateAnalysisContext(request *AnalysisContextRequest) error {
+	if request == nil {
+		return nil
+	}
+	if request.AnalysisKind != AnalysisKindSAST || request.Target.Type != AnalysisTargetRepository ||
+		!validOpaqueID(request.Target.ID) {
+		return ErrInvalid
+	}
+	return nil
+}
+
 func validateUploadRequest(request UploadRequest) error {
 	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.WorkspaceID) ||
 		!validOpaqueID(request.ApplicationID) || !validOpaqueID(request.ImportID) ||
@@ -320,6 +372,9 @@ func parseStorageKey(value string) (blobstore.Key, error) {
 }
 
 func fingerprintRequest(request ReserveRequest) ([sha256.Size]byte, error) {
+	if err := validateAnalysisContext(request.AnalysisContext); err != nil {
+		return [sha256.Size]byte{}, err
+	}
 	if request.ReportFormat.Name != "sarif" ||
 		(request.ReportFormat.Version != "" && request.ReportFormat.Version != "2.1.0") {
 		return [sha256.Size]byte{}, ErrInvalid
@@ -342,15 +397,17 @@ func fingerprintRequest(request ReserveRequest) ([sha256.Size]byte, error) {
 	}
 
 	input := struct {
-		ApplicationID    string       `json:"application_id"`
-		ReportFormat     ReportFormat `json:"report_format"`
-		OriginalFilename string       `json:"original_filename,omitempty"`
-		ExpectedSize     *int64       `json:"expected_size_bytes,omitempty"`
-		ExpectedSHA256   string       `json:"expected_sha256,omitempty"`
+		ApplicationID    string                  `json:"application_id"`
+		ReportFormat     ReportFormat            `json:"report_format"`
+		OriginalFilename string                  `json:"original_filename,omitempty"`
+		ExpectedSize     *int64                  `json:"expected_size_bytes,omitempty"`
+		ExpectedSHA256   string                  `json:"expected_sha256,omitempty"`
+		AnalysisContext  *AnalysisContextRequest `json:"analysis_context,omitempty"`
 	}{
 		ApplicationID: request.ApplicationID, ReportFormat: request.ReportFormat,
 		OriginalFilename: request.OriginalFilename, ExpectedSize: request.ExpectedSize,
-		ExpectedSHA256: request.ExpectedSHA256,
+		ExpectedSHA256:  request.ExpectedSHA256,
+		AnalysisContext: request.AnalysisContext,
 	}
 	encoded, err := json.Marshal(input)
 	if err != nil {

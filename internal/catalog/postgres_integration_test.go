@@ -108,6 +108,29 @@ func TestPostgresApplicationRepositoryLinkReplayConcurrencyAndIsolation(t *testi
 	if err != nil || replayed.Created || replayed.Relationship.ID != created.Relationship.ID {
 		t.Fatalf("replayed LinkRepository() = (%+v, %v)", replayed, err)
 	}
+	resolverStore, err := NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewResolutionService(resolverStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.ResolveActiveRepositoryTarget(ctx, ResolveRepositoryTargetRequest{
+		WorkspaceID: request.WorkspaceID, ApplicationID: request.ApplicationID,
+		RepositoryID: request.RepositoryID,
+	})
+	if err != nil || resolved.RelationshipID != created.Relationship.ID ||
+		resolved.RepositoryID != request.RepositoryID || resolved.ResolvedAt.IsZero() ||
+		resolved.ResolvedAt.Before(resolved.ValidFrom) {
+		t.Fatalf("ResolveActiveRepositoryTarget() = (%+v, %v)", resolved, err)
+	}
+	if _, err := resolver.ResolveActiveRepositoryTarget(ctx, ResolveRepositoryTargetRequest{
+		WorkspaceID: request.WorkspaceID, ApplicationID: "application-concurrent",
+		RepositoryID: request.RepositoryID,
+	}); !errors.Is(err, ErrRepositoryTargetNotFound) {
+		t.Fatalf("unlinked ResolveActiveRepositoryTarget() error = %v", err)
+	}
 	otherApplication := request
 	otherApplication.ApplicationID = "application-other"
 	otherLink, err := service.LinkRepository(ctx, otherApplication)

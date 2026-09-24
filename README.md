@@ -59,7 +59,10 @@ Implemented and tested internally:
   a versioned algorithm lacks safe Finding identity inputs; and
 - authorized Catalog application services and workspace-scoped persistence for
   idempotent Repository creation and explicit temporal
-  Application-to-Repository relationships.
+  Application-to-Repository relationships; and
+- immutable Import analysis-context persistence that attributes every derived
+  Scan to an authorized Repository relationship and feeds versioned correlation
+  dispatch without inferring identity from report content.
 
 Available to an operator today:
 

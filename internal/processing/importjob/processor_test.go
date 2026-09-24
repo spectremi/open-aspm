@@ -63,6 +63,26 @@ func TestMapScanPreservesUnknownCoverageAndScannerOutcome(t *testing.T) {
 	}
 }
 
+func TestMapScanRetainsAcceptedAnalysisContext(t *testing.T) {
+	source := ingestion.ProcessingSource{
+		ProcessingTarget: ingestion.ProcessingTarget{
+			WorkspaceID: "workspace-a", ImportID: "import-a", ApplicationID: "application-a",
+		},
+		RawArtifactID: "artifact-a",
+		AnalysisContext: &ingestion.AnalysisContext{
+			AnalysisKind: ingestion.AnalysisKindSAST, TargetType: ingestion.AnalysisTargetRepository,
+			TargetID: "repository-a", TargetRelationshipID: "relationship-a",
+		},
+	}
+	document := sarif.Document{Parser: sarif.ParserIdentity{Name: sarif.Format, Version: sarif.ParserVersion}}
+	run := sarif.Run{Index: 0, SourcePointer: "/runs/0", Tool: sarif.Tool{Name: "Synthetic Scanner"}}
+	scan := mapScan(source, document, run, "scan-a", time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC))
+	if scan.AnalysisContextImportID != "import-a" || scan.Scope.AnalysisKind != ingestion.AnalysisKindSAST ||
+		scan.Scope.ScannerFamily != "unknown" {
+		t.Fatalf("mapScan() context = import %q scope %+v", scan.AnalysisContextImportID, scan.Scope)
+	}
+}
+
 func TestParseSourceTimeDoesNotInventInvalidTime(t *testing.T) {
 	if got := parseSourceTime("not-a-time"); got != nil {
 		t.Fatalf("parseSourceTime() = %v, want unknown", got)

@@ -75,6 +75,7 @@ GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.repositories TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.repository_create_idempotency TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.application_repository_relationships TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.import_analysis_contexts TO open_aspm_runtime;
 ```
 
 The ingestion service implements the `createImport` reservation, streaming
@@ -119,9 +120,12 @@ outcome for one Observation, normalization version, and correlation algorithm
 version. Canonical reason codes preserve whether target, analysis, scanner,
 rule, package, vulnerability, location, or source context was unknown or
 unsafe. Exact replay is idempotent and conflicting reuse is rejected. After
-normalization, the import worker runs `correlation-dispatch` version `1`. The
-current contract has neither a stable catalog target identity nor a known
-analysis kind, so the worker retains both reasons and creates no Finding.
+normalization, the import worker retains `correlation-dispatch` version `1` for
+Imports without accepted analysis context, preserving the unknown target and
+analysis reasons across retries. An internally supplied `sast + repository`
+context uses version `2` and removes only those two blockers; the current SARIF
+adapter still retains unknown scanner-family and stable-source-context reasons
+and creates no Finding.
 
 The Catalog context owns workspace-scoped Repository identities and temporal
 Application-to-Repository relationships. Its application service authorizes
@@ -131,6 +135,12 @@ database constraints. Runtime roles can insert and read this first slice but
 cannot update or delete it; rename and relationship-end operations are not yet
 implemented. The Catalog service is internal until authenticated HTTP routes
 are added.
+
+An optional immutable Import analysis context can retain the exact active
+Application-to-Repository relationship, asserting principal, assertion source,
+and acceptance time. It participates in createImport idempotency and every Scan
+derived from the artifact references it. This is implemented at the application
+and worker layers but is not accepted by the current HTTP server yet.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,

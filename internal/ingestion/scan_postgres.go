@@ -49,18 +49,20 @@ func (store *PostgresStore) RecordScan(ctx context.Context, spec ScanSpec) (Stor
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO open_aspm.scans (
 			workspace_id, id, import_id, application_id, raw_artifact_id,
+			analysis_context_import_id,
 			source_run_index, result, completeness, scanner_name, scanner_full_name,
 			scanner_version, scanner_semantic_version, automation_id, automation_guid,
 			automation_correlation_guid, parser_name, parser_version, source_pointer,
 			source_started_at, source_ended_at, received_at, recorded_at, record_fingerprint
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10::varchar, ''),
+			$1, $2, $3, $4, $5, NULLIF($6::varchar, ''), $7, $8, $9, $10,
 			NULLIF($11::varchar, ''), NULLIF($12::varchar, ''), NULLIF($13::varchar, ''),
-			NULLIF($14::varchar, ''), NULLIF($15::varchar, ''), $16, $17, $18,
-			$19, $20, $21, $22, $23
+			NULLIF($14::varchar, ''), NULLIF($15::varchar, ''), NULLIF($16::varchar, ''),
+			$17, $18, $19, $20, $21, $22, $23, $24
 		)
 		ON CONFLICT (workspace_id, import_id, source_run_index) DO NOTHING`,
 		scan.WorkspaceID, spec.ID, scan.ImportID, scan.ApplicationID, scan.RawArtifactID,
+		scan.AnalysisContextImportID,
 		scan.SourceRunIndex, scan.Result, scan.Completeness, scan.ScannerName, scan.ScannerFullName,
 		scan.ScannerVersion, scan.ScannerSemanticVersion, scan.AutomationID, scan.AutomationGUID,
 		scan.AutomationCorrelationGUID, scan.ParserName, scan.ParserVersion, scan.SourcePointer,
@@ -109,7 +111,8 @@ func (store *PostgresStore) RecordScan(ctx context.Context, spec ScanSpec) (Stor
 	return StoredScan{
 		ID: spec.ID, WorkspaceID: spec.WorkspaceID, ImportID: spec.ImportID,
 		ApplicationID: spec.ApplicationID, RawArtifactID: spec.RawArtifactID,
-		ReceivedAt: receivedAt, RecordedAt: recordedAt, Created: true,
+		AnalysisContextImportID: spec.AnalysisContextImportID,
+		ReceivedAt:              receivedAt, RecordedAt: recordedAt, Created: true,
 	}, nil
 }
 
@@ -120,9 +123,11 @@ func selectStoredScan(
 ) (StoredScan, []byte, []byte, error) {
 	var stored StoredScan
 	var scanFingerprint, scopeFingerprint []byte
+	var analysisContextImportID sql.NullString
 	err := tx.QueryRowContext(ctx, `
 		SELECT scan.id, scan.workspace_id, scan.import_id, scan.application_id,
-		       scan.raw_artifact_id, scan.received_at, scan.recorded_at,
+		       scan.raw_artifact_id, scan.analysis_context_import_id,
+		       scan.received_at, scan.recorded_at,
 		       scan.record_fingerprint, scope.scope_fingerprint
 		FROM open_aspm.scans AS scan
 		JOIN open_aspm.scan_scopes AS scope
@@ -131,7 +136,8 @@ func selectStoredScan(
 		spec.WorkspaceID, spec.ImportID, spec.SourceRunIndex,
 	).Scan(
 		&stored.ID, &stored.WorkspaceID, &stored.ImportID, &stored.ApplicationID,
-		&stored.RawArtifactID, &stored.ReceivedAt, &stored.RecordedAt,
+		&stored.RawArtifactID, &analysisContextImportID,
+		&stored.ReceivedAt, &stored.RecordedAt,
 		&scanFingerprint, &scopeFingerprint,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -140,5 +146,6 @@ func selectStoredScan(
 	if err != nil {
 		return StoredScan{}, nil, nil, fmt.Errorf("read existing scan: %w", err)
 	}
+	stored.AnalysisContextImportID = analysisContextImportID.String
 	return stored, scanFingerprint, scopeFingerprint, nil
 }

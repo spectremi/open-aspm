@@ -60,6 +60,7 @@ type ScanSpec struct {
 	ImportID                  string
 	ApplicationID             string
 	RawArtifactID             string
+	AnalysisContextImportID   string
 	SourceRunIndex            int
 	Result                    ScanResult
 	Completeness              ScanCompleteness
@@ -82,14 +83,15 @@ type ScanSpec struct {
 // StoredScan reports the durable scan identity. Replays return the originally
 // stored ID and Created=false even when the caller generated another ID.
 type StoredScan struct {
-	ID            string
-	WorkspaceID   string
-	ImportID      string
-	ApplicationID string
-	RawArtifactID string
-	ReceivedAt    time.Time
-	RecordedAt    time.Time
-	Created       bool
+	ID                      string
+	WorkspaceID             string
+	ImportID                string
+	ApplicationID           string
+	RawArtifactID           string
+	AnalysisContextImportID string
+	ReceivedAt              time.Time
+	RecordedAt              time.Time
+	Created                 bool
 }
 
 type canonicalScanSpec struct {
@@ -97,6 +99,7 @@ type canonicalScanSpec struct {
 	ImportID                  string           `json:"import_id"`
 	ApplicationID             string           `json:"application_id"`
 	RawArtifactID             string           `json:"raw_artifact_id"`
+	AnalysisContextImportID   string           `json:"analysis_context_import_id,omitempty"`
 	SourceRunIndex            int              `json:"source_run_index"`
 	Result                    ScanResult       `json:"result"`
 	Completeness              ScanCompleteness `json:"completeness"`
@@ -131,6 +134,9 @@ func canonicalizeScanSpec(spec ScanSpec) (canonicalScanSpec, canonicalScope, [sh
 		!knownScanResult(spec.Result) || !knownScanCompleteness(spec.Completeness) || spec.RecordedAt.IsZero() {
 		return canonicalScanSpec{}, canonicalScope{}, [sha256.Size]byte{}, [sha256.Size]byte{}, ErrInvalid
 	}
+	if spec.AnalysisContextImportID != "" && spec.AnalysisContextImportID != spec.ImportID {
+		return canonicalScanSpec{}, canonicalScope{}, [sha256.Size]byte{}, [sha256.Size]byte{}, ErrInvalid
+	}
 	if !validText(spec.ScannerName, 1, 255) || !validOptionalText(spec.ScannerFullName, 512) ||
 		!validOptionalText(spec.ScannerVersion, 128) || !validOptionalText(spec.ScannerSemanticVersion, 128) ||
 		!validOptionalText(spec.AutomationID, 512) || !validOptionalText(spec.AutomationGUID, 128) ||
@@ -154,7 +160,8 @@ func canonicalizeScanSpec(spec ScanSpec) (canonicalScanSpec, canonicalScope, [sh
 	}
 	scan := canonicalScanSpec{
 		WorkspaceID: spec.WorkspaceID, ImportID: spec.ImportID, ApplicationID: spec.ApplicationID,
-		RawArtifactID: spec.RawArtifactID, SourceRunIndex: spec.SourceRunIndex, Result: spec.Result,
+		RawArtifactID: spec.RawArtifactID, AnalysisContextImportID: spec.AnalysisContextImportID,
+		SourceRunIndex: spec.SourceRunIndex, Result: spec.Result,
 		Completeness: spec.Completeness, ScannerName: spec.ScannerName, ScannerFullName: spec.ScannerFullName,
 		ScannerVersion: spec.ScannerVersion, ScannerSemanticVersion: spec.ScannerSemanticVersion,
 		AutomationID: spec.AutomationID, AutomationGUID: spec.AutomationGUID,
