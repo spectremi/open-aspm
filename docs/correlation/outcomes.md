@@ -39,6 +39,20 @@ The database constrains the allowed values, uniqueness, and ordering. The
 runtime role requires only `SELECT` and `INSERT`; outcomes cannot be updated in
 place.
 
+The import worker invokes `correlation-dispatch` version `1` after persisting
+each SARIF normalization. This dispatch step requires a stable catalog target
+identity and a known analysis kind before selecting a fingerprint family. The
+current ingestion contract supplies neither, so it deterministically records:
+
+```text
+target_identity_unknown
+analysis_kind_unknown
+```
+
+It does not add scanner-, rule-, package-, vulnerability-, location-, or
+source-context reasons before an analysis family has been selected, because
+those inputs are not required by every fingerprint family.
+
 ## Deliberately deferred
 
 This slice does not create Findings or correlation fingerprints. Current SARIF
@@ -46,10 +60,10 @@ imports provide only an Application identity and conservatively retain unknown
 scanner family and analysis kind. Treating an untrusted artifact URI as a
 Repository identity would violate ADR-0002 and ADR-0007.
 
-A later contract must provide an authorized stable target identity before a
-supported algorithm can create a fingerprint and attach an Observation to a
-Finding. The worker and authorized query API are not wired to these outcomes
-yet.
+A later contract must provide an authorized stable target identity and analysis
+kind before a supported family can create a fingerprint and attach an
+Observation to a Finding. The authorized query API is not wired to these
+outcomes yet.
 
 See [ADR-0007](../adr/0007-finding-identity-and-fingerprint-versioning.md) for
 the identity decision and [SARIF normalization](../normalization/sarif.md) for

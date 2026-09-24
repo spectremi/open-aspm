@@ -115,9 +115,10 @@ The correlation context can persist an explicit immutable `uncorrelated`
 outcome for one Observation, normalization version, and correlation algorithm
 version. Canonical reason codes preserve whether target, analysis, scanner,
 rule, package, vulnerability, location, or source context was unknown or
-unsafe. Exact replay is idempotent and conflicting reuse is rejected. The
-current import worker does not invoke this operation yet, and no Finding is
-created without the stable target identity required by ADR-0007.
+unsafe. Exact replay is idempotent and conflicting reuse is rejected. After
+normalization, the import worker runs `correlation-dispatch` version `1`. The
+current contract has neither a stable catalog target identity nor a known
+analysis kind, so the worker retains both reasons and creates no Finding.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,
