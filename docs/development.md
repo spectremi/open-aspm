@@ -72,6 +72,9 @@ GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO open_aspm_runtim
 GRANT SELECT, INSERT ON open_aspm.observation_correlation_outcomes TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_parse_outputs TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.repositories TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.repository_create_idempotency TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.application_repository_relationships TO open_aspm_runtime;
 ```
 
 The ingestion service implements the `createImport` reservation, streaming
@@ -119,6 +122,15 @@ unsafe. Exact replay is idempotent and conflicting reuse is rejected. After
 normalization, the import worker runs `correlation-dispatch` version `1`. The
 current contract has neither a stable catalog target identity nor a known
 analysis kind, so the worker retains both reasons and creates no Finding.
+
+The Catalog context owns workspace-scoped Repository identities and temporal
+Application-to-Repository relationships. Its application service authorizes
+Repository creation and linking separately, permits duplicate display names,
+and enforces create idempotency and one active relationship through durable
+database constraints. Runtime roles can insert and read this first slice but
+cannot update or delete it; rename and relationship-end operations are not yet
+implemented. The Catalog service is internal until authenticated HTTP routes
+are added.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,
