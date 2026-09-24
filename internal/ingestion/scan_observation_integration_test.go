@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/spectremi/open-aspm/internal/correlation"
 	"github.com/spectremi/open-aspm/internal/finding"
 )
 
@@ -158,7 +160,59 @@ func TestImmutableScanAndObservationPersistence(t *testing.T) {
 		t.Fatalf("new-version RecordNormalization() = %+v, %v; want independent version", newVersion, err)
 	}
 
-	var observations, locations, fingerprints, normalizations int
+	correlationStore, err := correlation.NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomeSpec := correlation.UncorrelatedSpec{
+		WorkspaceID: request.WorkspaceID, ObservationID: storedObservation.ID,
+		NormalizerName: "sarif", NormalizerVersion: "1",
+		Algorithm: "sast", AlgorithmVersion: "1",
+		Reasons: []correlation.ReasonCode{
+			correlation.ReasonScannerFamilyUnknown, correlation.ReasonTargetIdentityUnknown,
+			correlation.ReasonAnalysisKindUnknown, correlation.ReasonSourceContextUnknown,
+		},
+		EvaluatedAt: normalizationSpec.NormalizedAt.Add(time.Second),
+	}
+	storedOutcome, err := correlationStore.RecordUncorrelated(context.Background(), outcomeSpec)
+	if err != nil {
+		t.Fatalf("RecordUncorrelated() error = %v", err)
+	}
+	wantReasons := []correlation.ReasonCode{
+		correlation.ReasonTargetIdentityUnknown, correlation.ReasonAnalysisKindUnknown,
+		correlation.ReasonScannerFamilyUnknown, correlation.ReasonSourceContextUnknown,
+	}
+	if !storedOutcome.Created || storedOutcome.State != correlation.StateUncorrelated ||
+		!slices.Equal(storedOutcome.Reasons, wantReasons) {
+		t.Fatalf("RecordUncorrelated() = %+v, want canonical new outcome", storedOutcome)
+	}
+	replayedOutcomeSpec := outcomeSpec
+	replayedOutcomeSpec.EvaluatedAt = outcomeSpec.EvaluatedAt.Add(time.Minute)
+	replayedOutcomeSpec.Reasons = []correlation.ReasonCode{
+		correlation.ReasonSourceContextUnknown, correlation.ReasonAnalysisKindUnknown,
+		correlation.ReasonTargetIdentityUnknown, correlation.ReasonScannerFamilyUnknown,
+	}
+	replayedOutcome, err := correlationStore.RecordUncorrelated(context.Background(), replayedOutcomeSpec)
+	if err != nil {
+		t.Fatalf("RecordUncorrelated() replay error = %v", err)
+	}
+	if replayedOutcome.Created || !replayedOutcome.EvaluatedAt.Equal(outcomeSpec.EvaluatedAt) ||
+		!slices.Equal(replayedOutcome.Reasons, wantReasons) {
+		t.Fatalf("RecordUncorrelated() replay = %+v, want retained immutable outcome", replayedOutcome)
+	}
+	conflictingOutcome := replayedOutcomeSpec
+	conflictingOutcome.Reasons = []correlation.ReasonCode{correlation.ReasonTargetIdentityUnknown}
+	if _, err := correlationStore.RecordUncorrelated(context.Background(), conflictingOutcome); !errors.Is(err, correlation.ErrOutcomeConflict) {
+		t.Fatalf("conflicting RecordUncorrelated() error = %v, want ErrOutcomeConflict", err)
+	}
+	newOutcomeVersion := conflictingOutcome
+	newOutcomeVersion.AlgorithmVersion = "2"
+	newOutcome, err := correlationStore.RecordUncorrelated(context.Background(), newOutcomeVersion)
+	if err != nil || !newOutcome.Created {
+		t.Fatalf("new-version RecordUncorrelated() = %+v, %v; want independent version", newOutcome, err)
+	}
+
+	var observations, locations, fingerprints, normalizations, outcomes int
 	if err := db.QueryRow(`SELECT count(*) FROM open_aspm.observations WHERE workspace_id = $1`, request.WorkspaceID).
 		Scan(&observations); err != nil {
 		t.Fatal(err)
@@ -175,9 +229,13 @@ func TestImmutableScanAndObservationPersistence(t *testing.T) {
 		Scan(&normalizations); err != nil {
 		t.Fatal(err)
 	}
-	if observations != 1 || locations != 1 || fingerprints != 2 || normalizations != 2 {
-		t.Fatalf("stored rows = observations %d, locations %d, fingerprints %d, normalizations %d; want 1, 1, 2, 2",
-			observations, locations, fingerprints, normalizations)
+	if err := db.QueryRow(`SELECT count(*) FROM open_aspm.observation_correlation_outcomes WHERE workspace_id = $1`, request.WorkspaceID).
+		Scan(&outcomes); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 1 || locations != 1 || fingerprints != 2 || normalizations != 2 || outcomes != 2 {
+		t.Fatalf("stored rows = observations %d, locations %d, fingerprints %d, normalizations %d, outcomes %d; want 1, 1, 2, 2, 2",
+			observations, locations, fingerprints, normalizations, outcomes)
 	}
 	if _, err := db.Exec(`UPDATE open_aspm.observations SET message_text = 'changed' WHERE workspace_id = $1`, request.WorkspaceID); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable observations")
@@ -187,6 +245,9 @@ func TestImmutableScanAndObservationPersistence(t *testing.T) {
 	}
 	if _, err := db.Exec(`UPDATE open_aspm.observation_normalizations SET severity = 'critical' WHERE workspace_id = $1`, request.WorkspaceID); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable normalizations")
+	}
+	if _, err := db.Exec(`UPDATE open_aspm.observation_correlation_outcomes SET state = 'correlated' WHERE workspace_id = $1`, request.WorkspaceID); err == nil {
+		t.Fatal("runtime role unexpectedly updated immutable correlation outcomes")
 	}
 }
 
@@ -344,6 +405,54 @@ func TestConcurrentReplayAndWorkspaceIsolation(t *testing.T) {
 	if created != 1 {
 		t.Fatalf("concurrent normalization creations = %d, want 1", created)
 	}
+	correlationStore, err := correlation.NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomeResults := make(chan correlation.StoredOutcome, workers)
+	outcomeErrors := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			reasons := []correlation.ReasonCode{
+				correlation.ReasonSourceContextUnknown, correlation.ReasonTargetIdentityUnknown,
+				correlation.ReasonAnalysisKindUnknown,
+			}
+			if index%2 == 0 {
+				slices.Reverse(reasons)
+			}
+			stored, err := correlationStore.RecordUncorrelated(context.Background(), correlation.UncorrelatedSpec{
+				WorkspaceID: request.WorkspaceID, ObservationID: authoritativeObservationID,
+				NormalizerName: "sarif", NormalizerVersion: "1",
+				Algorithm: "sast", AlgorithmVersion: "1", Reasons: reasons,
+				EvaluatedAt: receivedAt.Add(3 * time.Second),
+			})
+			if err != nil {
+				outcomeErrors <- err
+				return
+			}
+			outcomeResults <- stored
+		}(index)
+	}
+	wait.Wait()
+	close(outcomeResults)
+	close(outcomeErrors)
+	for err := range outcomeErrors {
+		t.Errorf("concurrent RecordUncorrelated() error = %v", err)
+	}
+	created = 0
+	for result := range outcomeResults {
+		if result.ObservationID != authoritativeObservationID {
+			t.Fatalf("concurrent outcome observation ID = %q", result.ObservationID)
+		}
+		if result.Created {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("concurrent correlation outcome creations = %d, want 1", created)
+	}
 	crossWorkspace := baseObservation
 	crossWorkspace.ID = "observation-cross-workspace"
 	crossWorkspace.WorkspaceID = "workspace-b"
@@ -359,5 +468,14 @@ func TestConcurrentReplayAndWorkspaceIsolation(t *testing.T) {
 		NormalizedAt: receivedAt.Add(2 * time.Second),
 	}); !errors.Is(err, finding.ErrObservationNotFound) {
 		t.Fatalf("cross-workspace RecordNormalization() error = %v, want ErrObservationNotFound", err)
+	}
+	if _, err := correlationStore.RecordUncorrelated(context.Background(), correlation.UncorrelatedSpec{
+		WorkspaceID: "workspace-b", ObservationID: authoritativeObservationID,
+		NormalizerName: "sarif", NormalizerVersion: "1",
+		Algorithm: "sast", AlgorithmVersion: "1",
+		Reasons:     []correlation.ReasonCode{correlation.ReasonTargetIdentityUnknown},
+		EvaluatedAt: receivedAt.Add(3 * time.Second),
+	}); !errors.Is(err, correlation.ErrNormalizationNotFound) {
+		t.Fatalf("cross-workspace RecordUncorrelated() error = %v, want ErrNormalizationNotFound", err)
 	}
 }
