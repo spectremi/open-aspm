@@ -80,7 +80,73 @@ Repositories uses separately authorized Catalog operations so an ingestion
 token cannot acquire catalog-mutation authority as a side effect of uploading
 evidence.
 
-### 3. Analysis context is an attributable assertion
+### 3. Minimal Catalog provisioning is separate and vendor-neutral
+
+The same public `/api/v1` contract provides two minimum Catalog operations. A
+Repository is created independently from an Import:
+
+```http
+POST /workspaces/{workspace_id}/repositories
+Idempotency-Key: <key>
+
+{
+  "display_name": "example-service"
+}
+```
+
+The operation requires `catalog:repositories:create` and returns a Repository
+with a server-generated opaque ID. `display_name` is mutable presentation
+metadata, not identity. Duplicate display names are allowed. A different
+idempotency key with the same display name creates a distinct Repository; the
+server never deduplicates Catalog objects by name.
+
+Repository creation uses the same principal, workspace, API-major-version,
+operation, and key idempotency scope as `createImport`, including at least
+24-hour retention and conflict on changed validated input. The initial request
+does not accept provider IDs, URLs, or aliases. Those require a later explicit
+external-identity contract with provider-instance scope and provenance.
+
+An existing Repository is linked to an Application separately:
+
+```http
+PUT /workspaces/{workspace_id}/applications/{application_id}/repositories/{repository_id}
+```
+
+The operation requires `catalog:application-repositories:link`. It returns
+`201` with a new active relationship when none exists and `200` with the
+existing relationship on replay. Concurrent identical requests converge on
+one active relationship through a durable uniqueness constraint.
+
+The relationship has its own opaque ID and temporal history:
+
+```text
+ApplicationRepositoryRelationship
+  id
+  workspace_id
+  application_id
+  repository_id
+  valid_from
+  valid_until?
+```
+
+One Repository may be linked to multiple Applications. Ending a relationship
+closes its interval rather than deleting it; the public end operation is not
+required for the first ingestion slice. If a relationship is later ended and
+re-established, the new active interval receives a new relationship ID.
+
+Repository creation and linking are deliberately two operations. A client may
+retry each independently, and a Repository left unlinked after a failed second
+step remains an ordinary Catalog object rather than being silently deleted.
+The future CLI may wrap both calls for convenience, but it does not change
+server ownership or authorization.
+
+Catalog mutation capabilities are not granted to ordinary ingestion tokens.
+Repository creation is workspace-scoped; linking additionally requires
+effective Application scope and a Repository in the same workspace. New
+capabilities are assigned deliberately during deployment and do not broaden
+existing service-account tokens automatically.
+
+### 4. Analysis context is an attributable assertion
 
 The server records the accepted context as immutable Import provenance,
 including:
@@ -112,7 +178,7 @@ Historical Scans retain the context accepted at reservation time even if the
 Catalog relationship later ends. Ending a relationship affects new
 reservations; it does not rewrite earlier evidence or correlation decisions.
 
-### 4. One declared context applies to every run in the artifact
+### 5. One declared context applies to every run in the artifact
 
 When `analysis_context` is present, the client asserts that it applies to every
 run in the uploaded SARIF artifact. A client with runs for different targets or
@@ -123,7 +189,7 @@ Open ASPM does not infer run-to-target mappings from artifact URIs or tool
 messages. Run-specific context arrays are deferred until a demonstrated format
 requires them and can define an unambiguous mapping.
 
-### 5. Authorization and workspace isolation precede persistence
+### 6. Authorization and workspace isolation precede persistence
 
 The existing `imports:create` check remains scoped to the Application. In
 addition, the application service resolves the Repository using the request
@@ -138,7 +204,7 @@ constraints also prevent cross-workspace and cross-Application attribution.
 This reference check does not grant general Catalog read access and does not
 require an ingestion token to receive Catalog mutation capabilities.
 
-### 6. Context participates in createImport idempotency
+### 7. Context participates in createImport idempotency
 
 The normalized `analysis_context` is part of the `createImport` request
 fingerprint. Replaying the same idempotency key with the same context returns
@@ -150,7 +216,7 @@ authoritative Import state by the worker. It is not copied into the queue
 payload, selected from environment variables, or reconstructed from report
 content during a retry.
 
-### 7. Correlation consumes context without weakening its family rules
+### 8. Correlation consumes context without weakening its family rules
 
 A valid `sast + repository` context satisfies only the dispatch prerequisites
 for target identity and analysis kind. It does not by itself create a Finding.
@@ -182,6 +248,19 @@ provider-instance scope and provenance. Inline upsert would give
 `imports:create` implicit Catalog mutation authority and make conflicts or
 name reuse capable of changing asset identity during evidence upload.
 
+### Deduplicate Repository creation by display name
+
+Rejected because names are mutable, reusable, and non-unique. Idempotency
+prevents retry duplication for one logical create operation; it is not a
+workspace-wide claim that two equally named Repositories are the same object.
+
+### Create and link a Repository implicitly in one import operation
+
+Rejected because partial failure and retries would couple evidence ingestion
+to Catalog mutation, while an ingestion token would gain authority to create
+assets and relationships. Separate Catalog operations make both ownership and
+recovery explicit.
+
 ### Require analysis context on every Import
 
 Rejected because evidence preservation must support scanners and customer
@@ -206,6 +285,8 @@ initial behavior for mixed-target artifacts.
 
 - CI systems can attribute evidence without depending on GitHub, GitLab,
   Jenkins, or provider-specific environment variables.
+- A customer without a source-control connector can provision a curated
+  Repository and reuse its opaque ID from a proprietary delivery platform.
 - Correlation uses opaque Catalog identity rather than mutable locators.
 - Existing unmapped ingestion remains valid and visibly uncorrelated.
 - Context is reproducible across worker retries and attributable to the client
@@ -216,6 +297,8 @@ initial behavior for mixed-target artifacts.
 
 - A Repository and its Application relationship must be provisioned before a
   mapped Import can be reserved.
+- Initial provisioning requires two API calls, although a thin CLI may wrap
+  them.
 - Clients producing mixed-target SARIF must split the artifact to receive
   target-aware correlation in version one.
 - An authorized client can still make an incorrect attribution claim. Open
@@ -247,10 +330,16 @@ and mutation capabilities remain unavailable to ordinary ingestion tokens.
 
 ## Compatibility and migration
 
-The new request field and matching Import response field are optional additive
-changes to `/api/v1`. Existing clients and stored Imports continue to work.
-Existing rows are not backfilled from Application IDs, filenames, SARIF URIs,
-or other mutable data; their context remains absent.
+The Repository-create and Application-link operations, the new Import request
+field, and the matching Import response field are additive changes to
+`/api/v1`. Existing clients and stored Imports continue to work. Existing rows
+are not backfilled from Application IDs, filenames, SARIF URIs, or other
+mutable data; their context remains absent.
+
+The two new Catalog capabilities deny access until assigned. Existing
+ingestion service-account tokens do not receive them automatically. Repository
+display names remain mutable metadata and are not introduced into foreign keys
+or correlation fingerprints.
 
 A forward migration adds the minimum Catalog Repository relationship and
 immutable Import context structures without rewriting released migrations.
@@ -274,6 +363,12 @@ waits until compatible workers are available.
 Tests must prove:
 
 - omission of context retains both dispatch-unknown reasons;
+- Repository creation replay returns one opaque Repository, while a different
+  key with the same display name creates a distinct Repository;
+- concurrent identical link requests converge on one active relationship;
+- one Repository may be explicitly linked to multiple Applications without
+  merging those Applications;
+- an ordinary ingestion token cannot create Repositories or relationships;
 - a valid `sast + repository` context removes only the target and analysis
   dispatch blockers;
 - missing family-specific inputs remain explicitly `uncorrelated`;
@@ -290,8 +385,6 @@ Tests must prove:
 
 ## Open questions
 
-- What is the smallest public Catalog API and capability set for manually
-  provisioning and linking a Repository before provider connectors exist?
 - Which server-owned mapping establishes scanner family for the first SAST
   adapter without trusting arbitrary report text?
 - Which SARIF partial fingerprint or syntax-derived value is safe and stable
