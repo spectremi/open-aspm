@@ -76,3 +76,7 @@ Use [template.md](template.md) when proposing a decision.
 - [0005: Raw artifact storage and retention](0005-raw-artifact-storage-and-retention.md)
 - [0006: PostgreSQL access and schema migrations](0006-postgresql-access-and-migrations.md)
 - [0007: Finding identity and fingerprint versioning](0007-finding-identity-and-fingerprint-versioning.md)
+
+## Proposed decisions
+
+- [0008: Import analysis context and catalog target attribution](0008-import-analysis-context.md)
