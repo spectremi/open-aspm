@@ -64,7 +64,9 @@ Implemented and tested internally:
   Scan to an authorized Repository relationship and feeds versioned correlation
   dispatch without inferring identity from report content; and
 - durable principal, membership, role, API-token scope, and fail-closed
-  authorization evaluation foundations.
+  authorization evaluation foundations; and
+- high-entropy API-token generation and HMAC-verifier authentication without
+  retaining retrievable token plaintext.
 
 Available to an operator today:
 

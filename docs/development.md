@@ -81,7 +81,7 @@ GRANT SELECT ON open_aspm.workspace_memberships TO open_aspm_runtime;
 GRANT SELECT ON open_aspm.service_accounts TO open_aspm_runtime;
 GRANT SELECT ON open_aspm.role_capabilities TO open_aspm_runtime;
 GRANT SELECT ON open_aspm.role_bindings TO open_aspm_runtime;
-GRANT SELECT ON open_aspm.api_tokens TO open_aspm_runtime;
+GRANT SELECT, UPDATE (last_used_at) ON open_aspm.api_tokens TO open_aspm_runtime;
 GRANT SELECT ON open_aspm.api_token_capabilities TO open_aspm_runtime;
 GRANT SELECT ON open_aspm.api_token_application_scopes TO open_aspm_runtime;
 ```
@@ -155,8 +155,11 @@ service-account expiry, capability-bearing roles, temporal workspace or
 Application role bindings, and API-token capability and Application scopes.
 Its evaluator denies unknown, inactive, expired, revoked, cross-workspace, and
 out-of-scope decisions and treats token scope only as a restriction on current
-role grants. Bearer-token verification, initial bootstrap, HTTP integration,
-and operator-facing identity management are not implemented by this stage.
+role grants. The authentication service generates 256-bit token secrets,
+stores only versioned HMAC verifier material, verifies credentials in constant
+time, and conditionally records use while a token remains active. Initial
+bootstrap, runtime key configuration, HTTP integration, token rotation, and
+operator-facing identity management are not implemented by this stage.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,
