@@ -109,6 +109,7 @@ be versioned in the repository alongside the implementation.
 - [Architecture decisions](docs/adr/README.md)
 - [System threat model](docs/threat-model/system.md)
 - [Test data policy](docs/testing/test-data-policy.md)
+- [Catalog API v1 contract](docs/api/catalog-v1.md)
 - [Ingestion API v1 contract](docs/api/ingestion-v1.md)
 - [SARIF parser behavior](docs/parsing/sarif.md)
 - [SARIF Observation normalization](docs/normalization/sarif.md)

@@ -13,6 +13,7 @@ Related design documents:
 - [Architecture Decision Records](../adr/README.md)
 - [System threat model](../threat-model/system.md)
 - [Test data policy](../testing/test-data-policy.md)
+- [Catalog API v1 contract](../api/catalog-v1.md)
 - [Ingestion API v1 contract](../api/ingestion-v1.md)
 - [BlobStore implementation](../storage/blobstore.md)
 - [SARIF parsing](../parsing/sarif.md)
